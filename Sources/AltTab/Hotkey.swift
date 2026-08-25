@@ -28,6 +28,15 @@ struct Shortcut: Equatable, Codable {
             }
         }
 
+        /// The same modifier as AppKit spells it, for polling the live state.
+        var appKitFlag: NSEvent.ModifierFlags {
+            switch self {
+            case .option: return .option
+            case .control: return .control
+            case .command: return .command
+            }
+        }
+
         var symbol: String {
             switch self {
             case .option: return "⌥"
@@ -92,10 +101,23 @@ final class Hotkey {
     var onCommit: (() -> Void)?
     var onCancel: (() -> Void)?
 
-    private(set) var isActive = false
+    /// Touched from the tap thread and read from the main one.
+    private let lock = NSLock()
+    private var active = false
     private var shortcut: Shortcut
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
+    private var thread: Thread?
+    private var runLoop: CFRunLoop?
+
+    var isActive: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return active
+    }
+
+    private func setActive(_ value: Bool) {
+        lock.lock(); active = value; lock.unlock()
+    }
 
     init(shortcut: Shortcut) {
         self.shortcut = shortcut
@@ -108,9 +130,49 @@ final class Hotkey {
 
     // MARK: - Tap lifecycle
 
+    /// The tap runs on a thread of its own, and this is not a detail.
+    ///
+    /// An active event tap sits in the path of every keystroke on the Mac: the
+    /// window server hands the event over and waits for a verdict before
+    /// delivering it to anyone. If the tap's run loop is busy, input stalls —
+    /// system-wide, mouse included. Attached to the main run loop, any slow
+    /// main-thread work (a hung app answering an accessibility query, laying
+    /// out the panel) froze the whole machine's input until it finished.
+    ///
+    /// On its own thread the callback answers in microseconds no matter what
+    /// the rest of the app is doing. All it ever does is decide whether to
+    /// swallow the key and hand the real work to the main thread.
     @discardableResult
     func start() -> Bool {
         stop()
+        let ready = DispatchSemaphore(value: 0)
+        var created = false
+
+        let thread = Thread { [weak self] in
+            guard let self else { ready.signal(); return }
+            // Published before the semaphore so stop() can never observe a nil
+            // run loop for a thread that is already running.
+            self.runLoop = CFRunLoopGetCurrent()
+            created = self.installTap()
+            ready.signal()
+            guard created else { return }
+
+            while !Thread.current.isCancelled {
+                CFRunLoopRunInMode(.defaultMode, 1.0, false)
+            }
+            self.teardownTap()
+        }
+        thread.name = "br.com.nasralla.alttab.eventtap"
+        // Above default so the tap is never starved by ordinary work.
+        thread.qualityOfService = .userInteractive
+        thread.start()
+
+        ready.wait()
+        if created { self.thread = thread } else { thread.cancel() }
+        return created
+    }
+
+    private func installTap() -> Bool {
         let mask = (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.flagsChanged.rawValue)
 
@@ -127,22 +189,32 @@ final class Hotkey {
         else { return false }
 
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         self.tap = tap
         self.source = source
         return true
     }
 
-    func stop() {
+    private func teardownTap() {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
-        if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        if let source, let runLoop {
+            CFRunLoopRemoveSource(runLoop, source, .commonModes)
+        }
         tap = nil
         source = nil
-        isActive = false
+        runLoop = nil
     }
 
-    var isRunning: Bool { tap != nil }
+    func stop() {
+        guard let thread else { return }
+        thread.cancel()
+        if let runLoop { CFRunLoopStop(runLoop) }
+        self.thread = nil
+        setActive(false)
+    }
+
+    var isRunning: Bool { thread != nil }
 
     // MARK: - The state machine
 
@@ -161,7 +233,7 @@ final class Hotkey {
             // The modifier came up: that is the commit.
             if isActive, shortcut.modifier.keyCodes.contains(keyCode),
                !flags.contains(shortcut.modifier.flag) {
-                isActive = false
+                setActive(false)
                 DispatchQueue.main.async { [weak self] in self?.onCommit?() }
             }
             return Unmanaged.passUnretained(event)
@@ -172,7 +244,7 @@ final class Hotkey {
         if isActive {
             switch Int(keyCode) {
             case kVK_Escape:
-                isActive = false
+                setActive(false)
                 DispatchQueue.main.async { [weak self] in self?.onCancel?() }
                 return nil
             case Int(shortcut.keyCode):
@@ -186,12 +258,12 @@ final class Hotkey {
                 DispatchQueue.main.async { [weak self] in self?.onStep?(1) }
                 return nil
             case kVK_Return, kVK_ANSI_KeypadEnter:
-                isActive = false
+                setActive(false)
                 DispatchQueue.main.async { [weak self] in self?.onCommit?() }
                 return nil
             default:
                 // Any other key means the user moved on; get out of the way.
-                isActive = false
+                setActive(false)
                 DispatchQueue.main.async { [weak self] in self?.onCancel?() }
                 return Unmanaged.passUnretained(event)
             }
@@ -201,7 +273,7 @@ final class Hotkey {
         guard keyCode == shortcut.keyCode, flags.contains(shortcut.modifier.flag) else {
             return Unmanaged.passUnretained(event)
         }
-        isActive = true
+        setActive(true)
         let step = flags.contains(.maskShift) ? -1 : 1
         DispatchQueue.main.async { [weak self] in
             self?.onOpen?()
@@ -212,7 +284,7 @@ final class Hotkey {
 
     func cancel() {
         guard isActive else { return }
-        isActive = false
+        setActive(false)
         onCancel?()
     }
 }

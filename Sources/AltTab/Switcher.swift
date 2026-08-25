@@ -11,6 +11,17 @@ final class Switcher {
     private var entries: [WindowEntry] = []
     private var selection = 0
     private var captureTask: Task<Void, Never>?
+    private var watchdog: Timer?
+    /// Which modifier has to stay down for this pass to remain open.
+    private var heldModifier: NSEvent.ModifierFlags = .option
+
+    /// Gathering the list touches other processes, so it never runs on the main
+    /// thread. Serial: two overlapping passes would only fight each other.
+    private let listing = DispatchQueue(label: "br.com.nasralla.alttab.windows",
+                                        qos: .userInteractive)
+    /// Rises with every open, so a slow listing for a pass the user already
+    /// abandoned is dropped instead of appearing late.
+    private var generation = 0
 
     init() {
         panel.onClick = { [weak self] index in
@@ -24,16 +35,30 @@ final class Switcher {
 
     // MARK: - Opening
 
-    func open() {
-        entries = WindowList.fillMissingTitles(WindowList.current(
-            includeMinimized: Prefs.includeMinimized))
-        guard !entries.isEmpty else { return }
+    func open(modifier: NSEvent.ModifierFlags) {
+        heldModifier = modifier
+        generation += 1
+        let pass = generation
+        let includeMinimized = Prefs.includeMinimized
 
-        // Start on the window behind the current one — a single Option-Tab is
-        // "go back to what I was just doing", exactly as on Windows.
-        selection = entries.count > 1 ? 1 : 0
-        panel.show(entries: entries, selected: selection, on: screenForPanel())
-        startCaptures()
+        listing.async { [weak self] in
+            // Accessibility calls live here, off the main thread, where they
+            // cannot hold up the app or anything else on this Mac.
+            let found = WindowList.fillMissingTitles(
+                WindowList.current(includeMinimized: includeMinimized))
+
+            Task { @MainActor [weak self] in
+                guard let self, pass == self.generation, !found.isEmpty else { return }
+                self.entries = found
+                // Start on the window behind the current one — a single press
+                // is "go back to what I was just doing", as on Windows.
+                self.selection = found.count > 1 ? 1 : 0
+                self.panel.show(entries: found, selected: self.selection,
+                                on: self.screenForPanel())
+                self.startWatchdog()
+                self.startCaptures()
+            }
+        }
     }
 
     func step(_ delta: Int) {
@@ -43,9 +68,12 @@ final class Switcher {
     }
 
     func commit() {
-        defer { close() }
-        guard entries.indices.contains(selection) else { return }
-        AXWindows.focus(entries[selection])
+        let target = entries.indices.contains(selection) ? entries[selection] : nil
+        close()
+        guard let target else { return }
+        // Focusing talks to another process; keep it off the frame that is
+        // dismissing the panel so the panel disappears immediately either way.
+        DispatchQueue.global(qos: .userInitiated).async { AXWindows.focus(target) }
     }
 
     func cancel() {
@@ -53,12 +81,34 @@ final class Switcher {
     }
 
     private func close() {
+        generation += 1          // orphan any listing still in flight
+        watchdog?.invalidate()
+        watchdog = nil
         captureTask?.cancel()
         captureTask = nil
         panel.hide()
         let ids = Set(entries.map { $0.id })
         Task { await Thumbnails.shared.prune(keeping: ids) }
         entries = []
+    }
+
+    /// The panel floats above everything and accepts clicks, so one that got
+    /// stuck would eat them across the screen. Nothing should be able to strand
+    /// it: if the modifier is no longer physically held — a release that was
+    /// missed because the tap was disabled, a Space change, a crash mid-cycle —
+    /// this closes it on the next tick.
+    private func startWatchdog() {
+        watchdog?.invalidate()
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isOpen else { return }
+                if !NSEvent.modifierFlags.contains(self.heldModifier) {
+                    self.commit()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        watchdog = timer
     }
 
     /// Where the mouse is, so the switcher appears on the display the user is

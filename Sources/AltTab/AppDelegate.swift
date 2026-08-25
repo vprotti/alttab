@@ -34,7 +34,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let switcher = Switcher()
         let hotkey = Hotkey(shortcut: Prefs.shortcut)
-        hotkey.onOpen = { [weak switcher] in switcher?.open() }
+        // The switcher needs to know which modifier is holding it open, so it
+        // can close itself if the release is ever missed.
+        hotkey.onOpen = { [weak switcher] in
+            switcher?.open(modifier: Prefs.shortcut.modifier.appKitFlag)
+        }
         hotkey.onStep = { [weak switcher] delta in switcher?.step(delta) }
         hotkey.onCommit = { [weak switcher] in switcher?.commit() }
         hotkey.onCancel = { [weak switcher] in switcher?.cancel() }

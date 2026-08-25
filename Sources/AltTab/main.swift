@@ -8,6 +8,11 @@ if let i = args.firstIndex(of: "--selftest-switcher"), i + 1 < args.count {
     MainActor.assumeIsolated { SelfTest.renderSwitcher(to: args[i + 1]) }
     exit(0)
 }
+if args.contains("--selftest-tap") {
+    _ = NSApplication.shared
+    SelfTest.runTapCheck()
+    exit(0)
+}
 if args.contains("--selftest-windows") {
     SelfTest.printWindows()
     exit(0)

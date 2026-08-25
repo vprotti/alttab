@@ -34,6 +34,38 @@ enum SelfTest {
         }
     }
 
+    /// `--selftest-tap`: proves the event tap survives a blocked main thread.
+    ///
+    /// This is the regression test for the freeze. With the tap on the main run
+    /// loop, blocking the main thread stalled every keystroke and click on the
+    /// Mac until it finished, and the system eventually disabled the tap. On a
+    /// thread of its own it should still be enabled afterwards.
+    ///
+    /// Runs for about three seconds and exits on its own.
+    static func runTapCheck() {
+        guard Permissions.hasAccessibility else {
+            print("Accessibility: MISSING — cannot create an event tap without it")
+            exit(1)
+        }
+        let hotkey = Hotkey(shortcut: Prefs.shortcut)
+        guard hotkey.start() else {
+            print("FAIL: event tap could not be created")
+            exit(1)
+        }
+        print("ok   event tap created")
+
+        // Block the main thread hard, the way a wedged accessibility call did.
+        print("...  blocking the main thread for 2.5 s")
+        Thread.sleep(forTimeInterval: 2.5)
+
+        let alive = hotkey.isRunning
+        print(alive ? "ok   tap thread still alive after the block"
+                    : "FAIL tap thread died during the block")
+        hotkey.stop()
+        print(alive ? "\ntap: all checks passed" : "\ntap: FAILED")
+        exit(alive ? 0 : 1)
+    }
+
     /// `--selftest-switcher <path>`: draws the panel with stand-in windows, so
     /// the documentation image never contains anybody's real screen.
     @MainActor

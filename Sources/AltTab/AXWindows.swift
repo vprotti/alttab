@@ -46,9 +46,28 @@ enum AXWindows {
         return value as? T
     }
 
-    private static func windows(pid: pid_t) -> [AXUIElement] {
+    /// Every accessibility query is a synchronous message to another process,
+    /// and by default it waits forever. One busy or wedged app was enough to
+    /// block whoever asked — and when the asker was the main thread, the event
+    /// tap stopped answering and the Mac's input froze with it.
+    ///
+    /// A quarter of a second is generous for a healthy app and short enough
+    /// that an unhealthy one costs a missing title, not a frozen machine.
+    private static let messagingTimeout: Float = 0.25
+
+    private static func appElement(pid: pid_t) -> AXUIElement {
         let app = AXUIElementCreateApplication(pid)
-        return attribute(app, kAXWindowsAttribute, as: [AXUIElement].self) ?? []
+        AXUIElementSetMessagingTimeout(app, messagingTimeout)
+        return app
+    }
+
+    private static func windows(pid: pid_t) -> [AXUIElement] {
+        let windows = attribute(appElement(pid: pid), kAXWindowsAttribute,
+                                as: [AXUIElement].self) ?? []
+        // The timeout is set per element, and the window elements the app just
+        // handed back are new ones.
+        for window in windows { AXUIElementSetMessagingTimeout(window, messagingTimeout) }
+        return windows
     }
 
     /// The windows this process considers genuinely minimised.
