@@ -51,6 +51,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.hotkey = hotkey
         self.statusController = status
 
+        // A second launch — a double click while it is already running, or a
+        // login item that fired twice — should surface the copy that is here
+        // rather than look like nothing happened.
+        SingleInstance.onSecondLaunch { [weak self] in
+            NSApp.activate(ignoringOtherApps: true)
+            self?.showSettings()
+        }
+
         // Without Accessibility the tap cannot be created at all, so walk the
         // user through it before anything else. The app is useless until then.
         if Permissions.hasAccessibility {
@@ -78,15 +86,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func watchPermissions() {
         permissionTimer?.invalidate()
         let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let trusted = Permissions.hasAccessibility
-            if trusted {
-                self.startTap()
-            } else {
-                self.hotkey?.stop()
-                self.statusController?.setNeedsPermission(true)
+            // The timer already fires on the main run loop, but the closure is
+            // nonisolated as far as the compiler is concerned — hop explicitly
+            // rather than leave everything it touches unchecked.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if Permissions.hasAccessibility {
+                    self.startTap()
+                } else {
+                    self.hotkey?.stop()
+                    self.statusController?.setNeedsPermission(true)
+                }
+                self.permissionsController?.refresh()
             }
-            self.permissionsController?.refresh()
         }
         timer.tolerance = 1
         RunLoop.main.add(timer, forMode: .common)

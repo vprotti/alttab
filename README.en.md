@@ -40,7 +40,7 @@ Download the [DMG](https://nasmac.app/downloads/AltTab.dmg) — and **don't open
 macOS blocks the downloaded file, because the app is not notarized by Apple yet: notarization requires the paid developer program. Before opening it, run this in Terminal:
 
 ```bash
-xattr -dr com.apple.quarantine ~/Downloads/AltTab-1.0.0.dmg
+xattr -dr com.apple.quarantine ~/Downloads/AltTab*.dmg
 ```
 
 Now open the .dmg and drag the app to your Applications folder.

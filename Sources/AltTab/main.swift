@@ -18,6 +18,17 @@ if args.contains("--selftest-windows") {
     exit(0)
 }
 
+if args.contains("--selftest-single") { SingleInstance.runSelfTest() }
+
+// One copy at a time, and nothing on this Mac guarantees it on its own: a
+// binary exec'd directly — by launchd, or by a LaunchAgent some other
+// installer left behind pointing at this path — never passes through Launch
+// Services and starts a second app right on top of the first.
+guard SingleInstance.claim() else {
+    SingleInstance.wakeRunningInstance()
+    exit(0)
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let delegate = MainActor.assumeIsolated { AppDelegate() }
