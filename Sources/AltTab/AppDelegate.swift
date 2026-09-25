@@ -28,7 +28,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func start() {
-        if Prefs.launchAtLogin && !LoginItem.isEnabled {
+        // The first registration can fail — running from the DMG, before the
+        // app is in Applications — so it is retried until it has worked once.
+        // Never after: from then on the switch in System Settings is the
+        // user's, and re-registering would undo them turning it off.
+        if Prefs.launchAtLogin && !Prefs.loginItemRegistered && !LoginItem.isEnabled {
             LoginItem.set(enabled: true)
         }
 
@@ -60,10 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Without Accessibility the tap cannot be created at all, so walk the
-        // user through it before anything else. The app is useless until then.
+        // user through it before anything else. The app is useless until then
+        // — also after an update, when macOS quietly forgets a permission it
+        // tied to the previous binary, and the window is what explains that.
         if Permissions.hasAccessibility {
             startTap()
-        } else if !Prefs.onboardingDone {
+        } else {
             showPermissions()
         }
         watchPermissions()
@@ -111,9 +117,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showSettings() {
         if settingsController == nil {
-            settingsController = SettingsWindowController(onShortcutChanged: { [weak self] in
-                self?.reloadShortcut()
-            })
+            settingsController = SettingsWindowController(
+                onShortcutChanged: { [weak self] in self?.reloadShortcut() },
+                // While a new shortcut is being recorded the tap stands aside;
+                // otherwise pressing the current one there would open the
+                // switcher on top of the Settings window instead of recording.
+                onRecordingChanged: { [weak self] recording in
+                    self?.hotkey?.isSuspended = recording
+                })
         }
         settingsController?.show()
     }

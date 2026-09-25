@@ -78,6 +78,12 @@ enum L10n {
         "settings.change": (en: "Change", pt: "Alterar"),
         "settings.includeMinimized": (en: "Include minimized windows",
                                       pt: "Incluir janelas minimizadas"),
+        "settings.includeOtherSpaces": (en: "Include windows on other desktops",
+                                        pt: "Incluir janelas de outras mesas"),
+        "settings.otherSpacesHint": (
+            en: "Also lists windows on other Spaces and of apps hidden with ⌘H.",
+            pt: "Lista também janelas de outras mesas e de apps ocultos com ⌘H."),
+        "settings.version": (en: "Version", pt: "Versão"),
         "settings.launchAtLogin": (en: "Launch at login", pt: "Iniciar com o Mac"),
         "settings.loginHint": (en: "Move AltTab to the Applications folder to enable this.",
                                pt: "Mova o AltTab para a pasta Aplicativos para ativar isto."),

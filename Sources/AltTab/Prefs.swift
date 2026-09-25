@@ -7,10 +7,12 @@ enum Prefs {
     private enum Key {
         static let appLanguage = "appLanguage"
         static let launchAtLogin = "launchAtLogin"
+        static let loginItemRegistered = "loginItemRegistered"
         static let autoUpdate = "autoUpdate"
         static let updateAttempts = "updateAttempts"
         static let shortcut = "shortcut"
         static let includeMinimized = "includeMinimized"
+        static let includeOtherSpaces = "includeOtherSpaces"
         static let onboardingDone = "onboardingDone"
     }
 
@@ -19,6 +21,7 @@ enum Prefs {
             Key.launchAtLogin: true,
             Key.autoUpdate: true,
             Key.includeMinimized: true,
+            Key.includeOtherSpaces: true,
         ])
     }
 
@@ -31,6 +34,14 @@ enum Prefs {
     static var launchAtLogin: Bool {
         get { d.bool(forKey: Key.launchAtLogin) }
         set { d.set(newValue, forKey: Key.launchAtLogin) }
+    }
+
+    /// True once the login item has been registered successfully at least
+    /// once. After that the system's own switch is the truth: a person who
+    /// turns it off in System Settings must not find it back on at next launch.
+    static var loginItemRegistered: Bool {
+        get { d.bool(forKey: Key.loginItemRegistered) }
+        set { d.set(newValue, forKey: Key.loginItemRegistered) }
     }
 
     /// Keep the app current automatically. On by default — a menu bar utility
@@ -47,7 +58,7 @@ enum Prefs {
     static func noteUpdateAttempt(_ version: String) {
         var all = d.dictionary(forKey: Key.updateAttempts) as? [String: Int] ?? [:]
         all[version] = (all[version] ?? 0) + 1
-        d.set([version: all[version]!], forKey: Key.updateAttempts)
+        d.set(all, forKey: Key.updateAttempts)
     }
 
     /// The key combination that opens the switcher. Option-Tab out of the box.
@@ -65,6 +76,13 @@ enum Prefs {
     static var includeMinimized: Bool {
         get { d.bool(forKey: Key.includeMinimized) }
         set { d.set(newValue, forKey: Key.includeMinimized) }
+    }
+
+    /// Windows on other desktops, and those of apps hidden with ⌘H. They are
+    /// not on screen, but they are the ones hardest to get back to otherwise.
+    static var includeOtherSpaces: Bool {
+        get { d.bool(forKey: Key.includeOtherSpaces) }
+        set { d.set(newValue, forKey: Key.includeOtherSpaces) }
     }
 
     /// Whether the permission walkthrough has been completed once.

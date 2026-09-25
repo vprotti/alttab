@@ -17,7 +17,7 @@ struct WindowEntry {
     /// Screen coordinates, top-left origin (CoreGraphics convention).
     let frame: CGRect
     let isMinimized: Bool
-    /// Resolved once at construction. Looking this up per tile, per keystroke,
+    /// Resolved once. Looking this up per tile, per keystroke,
     /// meant asking the workspace for the same icon a dozen times a second.
     let icon: NSImage?
 
@@ -30,6 +30,12 @@ struct WindowEntry {
         self.frame = frame
         self.isMinimized = isMinimized
         self.icon = icon ?? NSRunningApplication(processIdentifier: pid)?.icon
+    }
+
+    /// The same window with what the accessibility layer added to it.
+    func with(title: String? = nil, isMinimized: Bool? = nil) -> WindowEntry {
+        WindowEntry(id: id, pid: pid, appName: appName, title: title ?? self.title,
+                    frame: frame, isMinimized: isMinimized ?? self.isMinimized, icon: icon)
     }
 
     /// What the row reads: the window's title, falling back to the app name so
@@ -46,6 +52,10 @@ enum WindowList {
     /// not something a person means to switch to. Measured against the real
     /// noise: helper windows come through at 64×64, 18×18 and 14×14.
     private static let minimumSide: CGFloat = 80
+
+    /// More than this and the grid would run off any screen; nobody cycles
+    /// through sixty windows with a modifier held down anyway.
+    private static let maxEntries = 60
 
     /// Which processes are allowed to own a switchable window.
     ///
@@ -65,18 +75,20 @@ enum WindowList {
     ///
     /// `.optionOnScreenOnly` returns them already ordered front-to-back, which
     /// is the order the switcher wants: the window you just left is second in
-    /// the list, so one press of Tab goes back to it.
-    static func current(includeMinimized: Bool = true) -> [WindowEntry] {
+    /// the list, so one press of Tab goes back to it. Windows not on this
+    /// screen right now — minimised, on another desktop, or belonging to an
+    /// app hidden with ⌘H — follow, each one confirmed with its app first.
+    static func current(includeMinimized: Bool = true,
+                        includeOtherSpaces: Bool = true) -> [WindowEntry] {
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let allowed = regularApps()
-
-        var entries: [WindowEntry] = []
         var seen = Set<CGWindowID>()
 
-        func collect(_ options: CGWindowListOption, offScreen: Bool) {
+        func collect(_ options: CGWindowListOption, offScreen: Bool) -> [WindowEntry] {
             guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
-            else { return }
+            else { return [] }
 
+            var entries: [WindowEntry] = []
             for info in raw {
                 guard let id = info[kCGWindowNumber as String] as? CGWindowID,
                       !seen.contains(id),
@@ -107,51 +119,48 @@ enum WindowList {
                     id: id, pid: pid,
                     appName: info[kCGWindowOwnerName as String] as? String ?? "",
                     title: (info[kCGWindowName as String] as? String) ?? "",
-                    frame: frame, isMinimized: offScreen))
+                    frame: frame, isMinimized: false))
             }
+            return entries
         }
 
         // On-screen first: this is the only option that returns windows in
         // front-to-back order, and that order is the switcher's whole premise.
-        collect([.optionOnScreenOnly, .excludeDesktopElements], offScreen: false)
-        guard includeMinimized else { return entries }
+        let onScreen = collect([.optionOnScreenOnly, .excludeDesktopElements], offScreen: false)
+        let offScreen = (includeMinimized || includeOtherSpaces)
+            ? collect([.optionAll, .excludeDesktopElements], offScreen: true)
+            : []
 
-        // Then the off-screen ones. The window server's off-screen list is not
-        // a list of minimised windows — it is everything not being drawn, which
-        // for a browser is a pile of hidden helper windows. So each candidate
-        // is confirmed with the app that owns it before it earns a row.
-        let onScreenCount = entries.count
-        collect([.optionAll, .excludeDesktopElements], offScreen: true)
+        // One accessibility round per process, and only for the processes
+        // that need one: an off-screen candidate has to be vouched for, and a
+        // title CoreGraphics withheld (no Screen Recording permission) can be
+        // read through Accessibility instead.
+        var asked = Set(offScreen.map { $0.pid })
+        for entry in onScreen where entry.title.isEmpty { asked.insert(entry.pid) }
+        var snapshots: [pid_t: [CGWindowID: AXWindows.Info]] = [:]
+        for pid in asked { snapshots[pid] = AXWindows.snapshot(pid: pid) }
 
-        let offScreen = entries[onScreenCount...]
-        var minimizedByPID: [pid_t: Set<CGWindowID>] = [:]
-        for pid in Set(offScreen.map { $0.pid }) {
-            minimizedByPID[pid] = AXWindows.minimizedIDs(pid: pid)
-        }
-        let confirmed = offScreen.filter { minimizedByPID[$0.pid]?.contains($0.id) == true }
-        return Array(entries[..<onScreenCount]) + confirmed
-    }
-
-    /// Titles come back empty without Screen Recording permission, so the
-    /// Accessibility API fills them in — it needs a different permission the app
-    /// already asks for, and between the two every row gets a real name.
-    static func fillMissingTitles(_ entries: [WindowEntry]) -> [WindowEntry] {
-        let missing = entries.filter { $0.title.isEmpty }
-        guard !missing.isEmpty else { return entries }
-
-        // One AX application element per process, not per window.
-        var titlesByPID: [pid_t: [CGWindowID: String]] = [:]
-        for pid in Set(missing.map { $0.pid }) {
-            titlesByPID[pid] = AXWindows.titles(pid: pid)
-        }
-
-        return entries.map { entry in
+        func titled(_ entry: WindowEntry) -> WindowEntry {
             guard entry.title.isEmpty,
-                  let title = titlesByPID[entry.pid]?[entry.id], !title.isEmpty
+                  let title = snapshots[entry.pid]?[entry.id]?.title, !title.isEmpty
             else { return entry }
-            return WindowEntry(id: entry.id, pid: entry.pid, appName: entry.appName,
-                               title: title, frame: entry.frame,
-                               isMinimized: entry.isMinimized, icon: entry.icon)
+            return entry.with(title: title)
         }
+
+        var result = onScreen.map(titled)
+        for entry in offScreen {
+            guard let info = snapshots[entry.pid]?[entry.id] else { continue }
+            if info.isMinimized {
+                guard includeMinimized else { continue }
+                result.append(titled(entry.with(isMinimized: true)))
+            } else if includeOtherSpaces, info.isStandard, !titled(entry).title.isEmpty {
+                // Not drawn, not minimised, yet a real titled window: it lives
+                // on another desktop or belongs to a hidden app. Untitled ones
+                // are left out — that is what an app's invisible helper looks
+                // like, and this list has to stay free of those.
+                result.append(titled(entry))
+            }
+        }
+        return Array(result.prefix(maxEntries))
     }
 }

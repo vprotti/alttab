@@ -10,7 +10,7 @@ enum SelfTest {
         print("Accessibility: \(Permissions.hasAccessibility ? "granted" : "MISSING")")
         print("Screen Recording: \(Permissions.hasScreenRecording ? "granted" : "missing (no previews, no titles)")")
 
-        let entries = WindowList.fillMissingTitles(WindowList.current())
+        let entries = WindowList.current()
         print("\n\(entries.count) windows:\n")
         for (index, entry) in entries.enumerated() {
             let size = "\(Int(entry.frame.width))×\(Int(entry.frame.height))"

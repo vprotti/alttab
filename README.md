@@ -30,6 +30,8 @@ Cada linha é uma janela de verdade, na ordem em que estão empilhadas na tela �
 
 - **Prévia de cada janela**, capturada na hora e sempre no mesmo tamanho.
 - **Janelas minimizadas** entram na lista (dá para desligar), confirmadas com o app dono — a lista bruta do sistema mistura popups de extensão e janelas auxiliares que ninguém quer ver.
+- **Janelas de outras mesas** e de apps ocultos com ⌘H também entram (dá para desligar) — são justamente as mais difíceis de alcançar de outro jeito.
+- **Um toque rápido** em ⌥Tab volta direto para a janela anterior, sem nem mostrar a grade.
 - **⇧Tab** volta, **setas** navegam, **Esc** cancela, **Enter** confirma, **clique** escolhe direto.
 - **Atalho configurável**: ⌥ Tab de fábrica, mas pode ser ⌃ ou ⌘ com outra tecla.
 

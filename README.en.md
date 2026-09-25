@@ -30,6 +30,8 @@ Every row is a real window, in the order they are stacked on screen — so a sin
 
 - **A preview of each window**, captured live and always at the same size.
 - **Minimized windows** are included (you can turn that off), confirmed with the app that owns them — the system's raw list mixes in extension popups and helper windows nobody wants to see.
+- **Windows on other desktops** and of apps hidden with ⌘H are included too (you can turn that off) — they are exactly the ones hardest to reach any other way.
+- **A quick tap** of ⌥Tab goes straight back to the previous window, without even showing the grid.
 - **⇧Tab** goes back, **arrows** navigate, **Esc** cancels, **Enter** confirms, **click** picks directly.
 - **Configurable shortcut**: ⌥ Tab out of the box, or ⌃ or ⌘ with a key of your choosing.
 

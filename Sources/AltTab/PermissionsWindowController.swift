@@ -123,9 +123,10 @@ final class PermissionsWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// Closing runs `windowWillClose`, which is where the finishing happens —
+    /// calling it here as well ran the whole hand-over twice.
     @objc private func finish() {
         window?.close()
-        windowWillClose(Notification(name: NSWindow.willCloseNotification))
     }
 
     func windowWillClose(_ notification: Notification) {

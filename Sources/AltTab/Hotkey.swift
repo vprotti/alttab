@@ -19,15 +19,6 @@ struct Shortcut: Equatable, Codable {
             }
         }
 
-        /// Both physical keys, because either one can be the one released.
-        var keyCodes: [UInt16] {
-            switch self {
-            case .option: return [UInt16(kVK_Option), UInt16(kVK_RightOption)]
-            case .control: return [UInt16(kVK_Control), UInt16(kVK_RightControl)]
-            case .command: return [UInt16(kVK_Command), UInt16(kVK_RightCommand)]
-            }
-        }
-
         /// The same modifier as AppKit spells it, for polling the live state.
         var appKitFlag: NSEvent.ModifierFlags {
             switch self {
@@ -101,14 +92,35 @@ final class Hotkey {
     var onCommit: (() -> Void)?
     var onCancel: (() -> Void)?
 
+    /// Everything one tap thread owns. It is created on that thread and torn
+    /// down on that thread, so a restart can never tear down the tap that
+    /// replaced it: the old thread only ever touches its own session.
+    private final class TapSession {
+        var tap: CFMachPort?
+        var source: CFRunLoopSource?
+        var runLoop: CFRunLoop?
+
+        func teardown() {
+            if let tap {
+                CGEvent.tapEnable(tap: tap, enable: false)
+                CFMachPortInvalidate(tap)
+            }
+            if let source, let runLoop {
+                CFRunLoopRemoveSource(runLoop, source, .commonModes)
+            }
+            tap = nil
+            source = nil
+            runLoop = nil
+        }
+    }
+
     /// Touched from the tap thread and read from the main one.
     private let lock = NSLock()
     private var active = false
+    private var suspended = false
     private var shortcut: Shortcut
-    private var tap: CFMachPort?
-    private var source: CFRunLoopSource?
+    private var session: TapSession?
     private var thread: Thread?
-    private var runLoop: CFRunLoop?
 
     var isActive: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -119,12 +131,26 @@ final class Hotkey {
         lock.lock(); active = value; lock.unlock()
     }
 
+    /// While suspended every key passes straight through. Set while the
+    /// Settings window is recording a new shortcut: otherwise pressing the
+    /// current one there would open the switcher instead of being recorded.
+    var isSuspended: Bool {
+        get {
+            lock.lock(); defer { lock.unlock() }
+            return suspended
+        }
+        set {
+            lock.lock(); suspended = newValue; lock.unlock()
+            if newValue { cancel() }
+        }
+    }
+
     init(shortcut: Shortcut) {
         self.shortcut = shortcut
     }
 
     func update(shortcut: Shortcut) {
-        self.shortcut = shortcut
+        lock.lock(); self.shortcut = shortcut; lock.unlock()
         cancel()
     }
 
@@ -145,22 +171,27 @@ final class Hotkey {
     @discardableResult
     func start() -> Bool {
         stop()
+        let session = TapSession()
         let ready = DispatchSemaphore(value: 0)
         var created = false
+
+        // Published before the thread exists, so the callback can find the tap
+        // to re-enable from its very first event.
+        lock.lock(); self.session = session; lock.unlock()
 
         let thread = Thread { [weak self] in
             guard let self else { ready.signal(); return }
             // Published before the semaphore so stop() can never observe a nil
             // run loop for a thread that is already running.
-            self.runLoop = CFRunLoopGetCurrent()
-            created = self.installTap()
+            session.runLoop = CFRunLoopGetCurrent()
+            created = self.installTap(into: session)
             ready.signal()
             guard created else { return }
 
             while !Thread.current.isCancelled {
                 CFRunLoopRunInMode(.defaultMode, 1.0, false)
             }
-            self.teardownTap()
+            session.teardown()
         }
         thread.name = "br.com.nasralla.alttab.eventtap"
         // Above default so the tap is never starved by ordinary work.
@@ -168,12 +199,20 @@ final class Hotkey {
         thread.start()
 
         ready.wait()
-        if created { self.thread = thread } else { thread.cancel() }
+        if created {
+            self.thread = thread
+        } else {
+            thread.cancel()
+            lock.lock(); self.session = nil; lock.unlock()
+        }
         return created
     }
 
-    private func installTap() -> Bool {
+    private func installTap(into session: TapSession) -> Bool {
+        // Key ups are watched too: a key whose press was swallowed must not
+        // release into the front app as a stray up with no down.
         let mask = (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.keyUp.rawValue)
             | (1 << CGEventType.flagsChanged.rawValue)
 
         guard let tap = CGEvent.tapCreate(
@@ -191,27 +230,24 @@ final class Hotkey {
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        self.tap = tap
-        self.source = source
+        session.tap = tap
+        session.source = source
         return true
-    }
-
-    private func teardownTap() {
-        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
-        if let source, let runLoop {
-            CFRunLoopRemoveSource(runLoop, source, .commonModes)
-        }
-        tap = nil
-        source = nil
-        runLoop = nil
     }
 
     func stop() {
         guard let thread else { return }
+        lock.lock()
+        let session = self.session
+        self.session = nil
+        active = false
+        lock.unlock()
+        // Read before cancelling: the thread clears it only on its way out,
+        // and it has no reason to leave until told to.
+        let runLoop = session?.runLoop
         thread.cancel()
         if let runLoop { CFRunLoopStop(runLoop) }
         self.thread = nil
-        setActive(false)
     }
 
     var isRunning: Bool { thread != nil }
@@ -222,26 +258,47 @@ final class Hotkey {
         // The system switches the tap off if a callback ever runs long, and
         // after certain user input. Turning it back on is our job.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            lock.lock(); let tap = session?.tap; lock.unlock()
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
 
+        // One consistent snapshot per event: the shortcut can be replaced from
+        // the main thread at any moment.
+        lock.lock()
+        let shortcut = self.shortcut
+        let active = self.active
+        let suspended = self.suspended
+        lock.unlock()
+        guard !suspended else { return Unmanaged.passUnretained(event) }
+
         let flags = event.flags
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
 
-        if type == .flagsChanged {
-            // The modifier came up: that is the commit.
-            if isActive, shortcut.modifier.keyCodes.contains(keyCode),
-               !flags.contains(shortcut.modifier.flag) {
+        switch type {
+        case .flagsChanged:
+            // The modifier is no longer down: that is the commit. Judged by the
+            // flags, not by which key changed — remapped keyboards and
+            // synthetic events report the release under other key codes.
+            if active, !flags.contains(shortcut.modifier.flag) {
                 setActive(false)
                 DispatchQueue.main.async { [weak self] in self?.onCommit?() }
             }
             return Unmanaged.passUnretained(event)
+
+        case .keyUp:
+            guard active, Self.isSwitcherKey(keyCode, shortcut: shortcut)
+            else { return Unmanaged.passUnretained(event) }
+            return nil
+
+        case .keyDown:
+            break
+
+        default:
+            return Unmanaged.passUnretained(event)
         }
 
-        guard type == .keyDown else { return Unmanaged.passUnretained(event) }
-
-        if isActive {
+        if active {
             switch Int(keyCode) {
             case kVK_Escape:
                 setActive(false)
@@ -280,6 +337,18 @@ final class Hotkey {
             if step == -1 { self?.onStep?(-1) }
         }
         return nil
+    }
+
+    /// The keys the switcher swallows while it is open.
+    private static func isSwitcherKey(_ keyCode: UInt16, shortcut: Shortcut) -> Bool {
+        if keyCode == shortcut.keyCode { return true }
+        switch Int(keyCode) {
+        case kVK_Escape, kVK_LeftArrow, kVK_UpArrow, kVK_RightArrow, kVK_DownArrow,
+             kVK_Return, kVK_ANSI_KeypadEnter:
+            return true
+        default:
+            return false
+        }
     }
 
     func cancel() {

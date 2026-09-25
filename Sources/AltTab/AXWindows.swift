@@ -70,33 +70,39 @@ enum AXWindows {
         return windows
     }
 
-    /// The windows this process considers genuinely minimised.
-    ///
-    /// Needed because the window server's off-screen list is not a list of
-    /// minimised windows — it is everything not currently drawn, which for a
-    /// browser means a pile of 1224×88 extension popups and hidden helpers.
-    /// The app itself knows which of its windows a person actually minimised,
-    /// so that is who gets asked.
-    static func minimizedIDs(pid: pid_t) -> Set<CGWindowID> {
-        var result: Set<CGWindowID> = []
-        for window in windows(pid: pid) {
-            guard attribute(window, kAXMinimizedAttribute, as: Bool.self) == true,
-                  let id = windowID(of: window)
-            else { continue }
-            result.insert(id)
+    /// What one process says about one of its windows.
+    struct Info {
+        let title: String?
+        let isMinimized: Bool
+        let subrole: String?
+
+        /// A document or dialog window, as opposed to a floating helper, a
+        /// popup bubble or something the app never meant anyone to switch to.
+        var isStandard: Bool {
+            subrole == kAXStandardWindowSubrole || subrole == kAXDialogSubrole
         }
-        return result
     }
 
-    /// Every window title this process will admit to, keyed by window id.
-    /// Used to fill in titles CoreGraphics withheld.
-    static func titles(pid: pid_t) -> [CGWindowID: String] {
-        var result: [CGWindowID: String] = [:]
+    /// Everything the switcher wants to know about a process's windows, keyed
+    /// by window id, in one round trip per window rather than one per
+    /// attribute. The window server's off-screen list is not a list of
+    /// minimised windows — it is everything not currently drawn, which for a
+    /// browser means a pile of 1224×88 extension popups and hidden helpers —
+    /// so the app itself is asked which of its windows are real.
+    static func snapshot(pid: pid_t) -> [CGWindowID: Info] {
+        var result: [CGWindowID: Info] = [:]
+        let attributes = [kAXTitleAttribute, kAXMinimizedAttribute, kAXSubroleAttribute] as CFArray
         for window in windows(pid: pid) {
-            guard let id = windowID(of: window),
-                  let title = attribute(window, kAXTitleAttribute, as: String.self)
+            guard let id = windowID(of: window) else { continue }
+            var values: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(window, attributes, [], &values) == .success,
+                  let array = values as? [Any], array.count == 3
             else { continue }
-            result[id] = title
+            // A value the app could not supply comes back as an AXValue error
+            // placeholder, which fails every cast below exactly as intended.
+            result[id] = Info(title: array[0] as? String,
+                              isMinimized: (array[1] as? Bool) ?? false,
+                              subrole: array[2] as? String)
         }
         return result
     }
@@ -138,15 +144,22 @@ enum AXWindows {
 
     /// Brings one window forward and gives it the keyboard.
     ///
-    /// The order matters and all three steps are needed: un-minimise so the
+    /// The order matters and all the steps are needed: un-minimise so the
     /// window exists on screen at all, raise it above its app's other windows,
-    /// then activate the app so the keyboard follows. Activating first would
-    /// bring up whichever window that app had in front, not this one.
+    /// then bring the app forward so the keyboard follows. Activating first
+    /// would bring up whichever window that app had in front, not this one.
+    ///
+    /// The app is brought forward two ways. Setting `AXFrontmost` works from
+    /// a background process on every macOS this app runs on; the AppKit
+    /// activation is also asked, because it is the one that unhides an app
+    /// hidden with ⌘H and switches Spaces reliably.
     @discardableResult
     static func focus(_ entry: WindowEntry) -> Bool {
         guard let window = element(for: entry) else {
             // No accessibility element — the best that is left is the app.
-            entry.app?.activate(options: [.activateAllWindows])
+            DispatchQueue.main.async {
+                entry.app?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            }
             return false
         }
 
@@ -156,8 +169,12 @@ enum AXWindows {
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+        AXUIElementSetAttributeValue(appElement(pid: entry.pid),
+                                     kAXFrontmostAttribute as CFString, true as CFTypeRef)
 
-        entry.app?.activate(options: [])
+        DispatchQueue.main.async {
+            entry.app?.activate(options: [.activateIgnoringOtherApps])
+        }
         return true
     }
 }

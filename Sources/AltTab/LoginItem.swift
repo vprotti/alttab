@@ -19,6 +19,7 @@ enum LoginItem {
                 try SMAppService.mainApp.unregister()
             }
             Prefs.launchAtLogin = enabled
+            Prefs.loginItemRegistered = true
             return true
         } catch {
             NSLog("LoginItem: %@ failed: %@", enabled ? "register" : "unregister",

@@ -24,8 +24,13 @@ final class SwitcherPanel: NSPanel {
         hidesOnDeactivate = false
         ignoresMouseEvents = false
         isMovable = false
+        animationBehavior = .none
         // Never appear in a screenshot of "all windows" or in Mission Control.
         sharingType = .none
+        // The slab is always dark, so what is written on it must be drawn for
+        // dark too. Left to follow the system, light mode painted dark-grey
+        // titles onto a dark HUD and they vanished.
+        appearance = NSAppearance(named: .darkAqua)
 
         contentView = content
     }
@@ -41,14 +46,29 @@ final class SwitcherPanel: NSPanel {
         guard let visible = target?.visibleFrame else { return }
 
         // The grid needs to know what it has to fit inside before it can decide
-        // how many columns to use.
-        content.update(entries: entries, selected: selected, maxWidth: visible.width)
-        let size = content.fittingSize
+        // how many columns to use and how big a tile can be.
+        content.update(entries: entries, selected: selected,
+                       maxWidth: visible.width, maxHeight: visible.height)
+        var size = content.fittingSize
+        size.width = min(size.width, visible.width)
+        size.height = min(size.height, visible.height)
         setContentSize(size)
         setFrameOrigin(NSPoint(
-            x: visible.midX - size.width / 2,
-            y: visible.midY - size.height / 2))
+            x: (visible.midX - size.width / 2).rounded(),
+            y: (visible.midY - size.height / 2).rounded()))
+        // The shadow is cached per size; without this a smaller grid kept the
+        // ghost of the previous, larger one around its edges.
+        invalidateShadow()
+
+        guard !isVisible else { return }
+        // Just long enough to read as arriving rather than blinking on.
+        // Hiding is instant: the window the user picked must not wait.
+        alphaValue = 0
         orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.09
+            self.animator().alphaValue = 1
+        }
     }
 
     func select(_ index: Int) {
@@ -57,6 +77,7 @@ final class SwitcherPanel: NSPanel {
 
     func hide() {
         orderOut(nil)
+        alphaValue = 1
     }
 
     /// Fills in a preview as soon as it has been captured, without rebuilding
@@ -75,12 +96,24 @@ final class SwitcherPanel: NSPanel {
 ///
 /// The tiles wrap onto as many rows as they need. A single row was fine with
 /// four windows and unusable with fourteen — it ran off both edges of the
-/// screen and squeezed every title down to nothing.
+/// screen and squeezed every title down to nothing. Past what fits at full
+/// size, the tiles shrink a step at a time so the grid stays on the screen.
 private final class SwitcherContentView: NSVisualEffectView {
-    /// Never wider than this share of the screen, however many windows exist.
-    private static let maxWidthFraction: CGFloat = 0.86
-    /// Beyond this the tiles get too small to tell apart at a glance.
-    private static let maxColumns = 6
+    /// Never wider or taller than this share of the screen, however many
+    /// windows exist.
+    private static let maxFraction: CGFloat = 0.86
+    private static let inset: CGFloat = 22
+    private static let gap: CGFloat = 14
+    private static let cornerRadius: CGFloat = 22
+    /// The caption row below the grid: its spacing above, its height, the
+    /// bottom inset. Part of what has to fit vertically.
+    private static let captionBlock: CGFloat = 14 + 18 + 18
+
+    /// Each step down in size buys wider rows: at full size six tiles across
+    /// is the most the eye takes in; at two thirds it can read nine.
+    private static let sizes: [(scale: CGFloat, maxColumns: Int)] = [
+        (1.0, 6), (0.88, 7), (0.76, 8), (0.64, 9),
+    ]
 
     private let rows = NSStackView()
     private let caption = NSTextField(labelWithString: "")
@@ -93,80 +126,141 @@ private final class SwitcherContentView: NSVisualEffectView {
         blendingMode = .behindWindow
         state = .active
         wantsLayer = true
-        layer?.cornerRadius = 20
+        layer?.cornerRadius = Self.cornerRadius
+        layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
+        // A hairline lip so the slab reads as an object on a dark wallpaper,
+        // where an unedged blur just smears into the background.
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        maskImage = Self.roundedMask(radius: Self.cornerRadius)
 
         rows.orientation = .vertical
         rows.alignment = .centerX
-        rows.spacing = 14
+        rows.spacing = Self.gap
         rows.translatesAutoresizingMaskIntoConstraints = false
 
         // The selected window's whole title, which no tile has room for.
-        caption.font = .systemFont(ofSize: 13, weight: .medium)
         caption.alignment = .center
         caption.lineBreakMode = .byTruncatingMiddle
+        caption.maximumNumberOfLines = 1
         caption.translatesAutoresizingMaskIntoConstraints = false
         caption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        caption.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         addSubview(rows)
         addSubview(caption)
         NSLayoutConstraint.activate([
-            rows.topAnchor.constraint(equalTo: topAnchor, constant: 22),
-            rows.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 22),
-            rows.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -22),
+            rows.topAnchor.constraint(equalTo: topAnchor, constant: Self.inset),
+            rows.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
+            rows.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.inset),
             caption.topAnchor.constraint(equalTo: rows.bottomAnchor, constant: 14),
+            caption.heightAnchor.constraint(equalToConstant: 18),
             caption.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -18),
-            caption.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 22),
-            caption.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -22),
+            caption.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
+            caption.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.inset),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func update(entries: [WindowEntry], selected: Int, maxWidth: CGFloat) {
+    /// The documented way to round a visual effect view: a stretchable mask.
+    /// The layer's corner radius alone clips the subviews but, on some
+    /// releases, not the blur itself.
+    private static func roundedMask(radius: CGFloat) -> NSImage {
+        let side = radius * 2 + 1
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
+    }
+
+    func update(entries: [WindowEntry], selected: Int, maxWidth: CGFloat, maxHeight: CGFloat) {
         rows.arrangedSubviews.forEach { $0.removeFromSuperview() }
         tiles = []
         guard !entries.isEmpty else { return }
 
-        let columns = Self.columns(for: entries.count,
-                                   maxWidth: maxWidth * Self.maxWidthFraction)
+        let layout = Self.arrangement(for: entries.count, maxWidth: maxWidth, maxHeight: maxHeight)
         var index = 0
         while index < entries.count {
-            let slice = entries[index ..< min(index + columns, entries.count)]
+            let end = min(index + layout.columns, entries.count)
             let row = NSStackView()
             row.orientation = .horizontal
-            row.spacing = 14
+            row.spacing = Self.gap
             row.alignment = .top
 
-            for (offset, entry) in slice.enumerated() {
-                let position = index + offset
-                let tile = SwitcherTileView(entry: entry)
+            for position in index ..< end {
+                let tile = SwitcherTileView(entry: entries[position], scale: layout.scale)
                 tile.onClick = { [weak self] in self?.onClick?(position) }
                 row.addArrangedSubview(tile)
                 tiles.append(tile)
             }
             rows.addArrangedSubview(row)
-            index += columns
+            index = end
         }
         select(selected)
     }
 
-    /// The fewest rows the tiles fit in, then spread evenly across them.
+    /// The largest tiles that fit, in the fewest rows, spread evenly.
     ///
     /// Fewest rows because screens are wide and eyes scan sideways: seven
     /// windows want four and three, not three rows of three. Spreading evenly
-    /// afterwards avoids a full row followed by a lonely leftover.
-    private static func columns(for count: Int, maxWidth: CGFloat) -> Int {
-        let perTile = SwitcherTileView.tileWidth + 14
-        let fits = max(1, Int((maxWidth - 44) / perTile))
-        let perRow = min(maxColumns, fits)
-        let rows = max(1, Int(ceil(Double(count) / Double(perRow))))
-        return max(1, Int(ceil(Double(count) / Double(rows))))
+    /// afterwards avoids a full row followed by a lonely leftover. When even
+    /// that overflows the screen the tiles step down a size and try again.
+    private static func arrangement(for count: Int, maxWidth: CGFloat,
+                                    maxHeight: CGFloat) -> (scale: CGFloat, columns: Int) {
+        let width = maxWidth * maxFraction - inset * 2
+        let height = maxHeight * maxFraction - inset - captionBlock
+        var chosen: (scale: CGFloat, columns: Int) = (sizes[0].scale, 1)
+
+        for size in sizes {
+            let tileWidth = SwitcherTileView.width(scale: size.scale)
+            let tileHeight = SwitcherTileView.height(scale: size.scale)
+            let fits = max(1, Int((width + gap) / (tileWidth + gap)))
+            let perRow = min(size.maxColumns, fits)
+            let rowCount = max(1, Int(ceil(Double(count) / Double(perRow))))
+            let columns = max(1, Int(ceil(Double(count) / Double(rowCount))))
+            chosen = (size.scale, columns)
+            let total = CGFloat(rowCount) * tileHeight + CGFloat(rowCount - 1) * gap
+            if total <= height { break }
+        }
+        return chosen
     }
 
     func select(_ index: Int) {
         for (i, tile) in tiles.enumerated() { tile.isSelected = (i == index) }
-        caption.stringValue = tiles.indices.contains(index) ? tiles[index].fullTitle : ""
+        guard tiles.indices.contains(index) else {
+            caption.attributedStringValue = NSAttributedString(string: "")
+            return
+        }
+        caption.attributedStringValue = Self.captionText(title: tiles[index].title,
+                                                         app: tiles[index].appName)
+    }
+
+    /// "Title  ·  App": the title carries the weight, the app name is there
+    /// for the two-Chromes case where the icon alone does not settle it.
+    private static func captionText(title: String, app: String) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byTruncatingMiddle
+
+        let text = NSMutableAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph,
+        ])
+        if !app.isEmpty, app != title {
+            text.append(NSAttributedString(string: "  ·  " + app, attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: paragraph,
+            ]))
+        }
+        return text
     }
 
     func apply(image: NSImage, for id: CGWindowID) {
@@ -176,24 +270,43 @@ private final class SwitcherContentView: NSVisualEffectView {
 
 /// One window: a preview at a fixed size, its app icon, and its title.
 private final class SwitcherTileView: NSView {
-    static let tileWidth: CGFloat = 176
-    static let previewHeight: CGFloat = 108
+    private static let baseWidth: CGFloat = 176
+    private static let basePreviewHeight: CGFloat = 108
+    private static let padding: CGFloat = 10
+    private static let iconSide: CGFloat = 16
+
+    static func width(scale: CGFloat) -> CGFloat { (baseWidth * scale).rounded() }
+    static func previewHeight(scale: CGFloat) -> CGFloat { (basePreviewHeight * scale).rounded() }
+    static func height(scale: CGFloat) -> CGFloat {
+        previewHeight(scale: scale) + padding + 8 + iconSide + padding
+    }
 
     let windowID: CGWindowID
-    let fullTitle: String
+    let title: String
+    let appName: String
     var onClick: (() -> Void)?
 
     private let preview = PreviewView()
     private let iconView = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private var tracking: NSTrackingArea?
 
     var isSelected = false {
-        didSet { needsDisplay = true }
+        didSet {
+            guard isSelected != oldValue else { return }
+            label.textColor = isSelected ? .labelColor : .secondaryLabelColor
+            needsDisplay = true
+        }
     }
 
-    init(entry: WindowEntry) {
+    private var isHovered = false {
+        didSet { if isHovered != oldValue { needsDisplay = true } }
+    }
+
+    init(entry: WindowEntry, scale: CGFloat) {
         windowID = entry.id
-        fullTitle = entry.displayTitle
+        title = entry.displayTitle
+        appName = entry.appName
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
@@ -202,7 +315,7 @@ private final class SwitcherTileView: NSView {
         // rather than at whatever its natural resolution happens to be — that
         // is what made some tiles show a postage stamp and others a full frame.
         preview.setIcon(entry.icon)
-        preview.alphaValue = entry.isMinimized ? 0.5 : 1
+        preview.isMinimized = entry.isMinimized
         preview.translatesAutoresizingMaskIntoConstraints = false
 
         iconView.image = entry.icon
@@ -212,35 +325,37 @@ private final class SwitcherTileView: NSView {
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         label.stringValue = entry.displayTitle
-        label.font = .systemFont(ofSize: 11)
+        label.font = .systemFont(ofSize: 11, weight: .medium)
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         label.alignment = .left
+        label.toolTip = entry.displayTitle
         label.translatesAutoresizingMaskIntoConstraints = false
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        let pad = Self.padding
         addSubview(preview)
         addSubview(iconView)
         addSubview(label)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: Self.tileWidth),
+            widthAnchor.constraint(equalToConstant: Self.width(scale: scale)),
 
-            preview.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            preview.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            preview.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            preview.heightAnchor.constraint(equalToConstant: Self.previewHeight),
+            preview.topAnchor.constraint(equalTo: topAnchor, constant: pad),
+            preview.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
+            preview.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
+            preview.heightAnchor.constraint(equalToConstant: Self.previewHeight(scale: scale)),
 
             iconView.topAnchor.constraint(equalTo: preview.bottomAnchor, constant: 8),
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            iconView.widthAnchor.constraint(equalToConstant: 16),
-            iconView.heightAnchor.constraint(equalToConstant: 16),
-            iconView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
+            iconView.widthAnchor.constraint(equalToConstant: Self.iconSide),
+            iconView.heightAnchor.constraint(equalToConstant: Self.iconSide),
+            iconView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -pad),
 
             // Pinned to both edges so the title always has the row to itself
             // and can truncate instead of being squeezed out of existence.
             label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 6),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
             label.centerYAnchor.constraint(equalTo: iconView.centerYAnchor),
         ])
     }
@@ -252,19 +367,43 @@ private final class SwitcherTileView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard isSelected else { return }
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1),
-                                xRadius: 12, yRadius: 12)
-        NSColor.controlAccentColor.withAlphaComponent(0.30).setFill()
-        path.fill()
-        NSColor.controlAccentColor.setStroke()
-        path.lineWidth = 2
-        path.stroke()
+                                xRadius: 14, yRadius: 14)
+        if isSelected {
+            NSColor.controlAccentColor.withAlphaComponent(0.28).setFill()
+            path.fill()
+            NSColor.controlAccentColor.setStroke()
+            path.lineWidth = 2
+            path.stroke()
+        } else if isHovered {
+            NSColor.white.withAlphaComponent(0.07).setFill()
+            path.fill()
+        }
     }
 
+    // MARK: - Mouse
+
+    /// The panel is never key, and a view in a non-key window drops its first
+    /// click unless it says otherwise. Every click here is the first one.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseUp(with event: NSEvent) {
+        guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
         onClick?()
     }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
 }
 
 /// Draws a window preview at one consistent size.
@@ -276,6 +415,12 @@ private final class SwitcherTileView: NSView {
 private final class PreviewView: NSView {
     private var image: NSImage?
     private var isIcon = true
+
+    /// A minimised window is drawn dimmed, with a small mark in the corner, so
+    /// it is plainly not one of the windows on screen right now.
+    var isMinimized = false {
+        didSet { needsDisplay = true }
+    }
 
     /// How much of the box an icon takes when there is no capture yet.
     private static let iconSide: CGFloat = 56
@@ -293,30 +438,64 @@ private final class PreviewView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let box = NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8)
-        NSColor.black.withAlphaComponent(0.22).setFill()
+        let box = NSBezierPath(roundedRect: bounds, xRadius: 9, yRadius: 9)
+        NSColor.black.withAlphaComponent(0.26).setFill()
         box.fill()
 
-        guard let image, image.size.width > 0, image.size.height > 0 else { return }
-
-        let target: NSRect
-        if isIcon {
-            let side = min(Self.iconSide, min(bounds.width, bounds.height) - 8)
-            target = NSRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2,
-                            width: side, height: side)
-        } else {
-            // Fit the whole window inside the box: cropping a screenshot would
-            // hide the very part that tells two windows apart.
-            let scale = min(bounds.width / image.size.width,
-                            bounds.height / image.size.height)
-            let size = NSSize(width: image.size.width * scale,
-                              height: image.size.height * scale)
-            target = NSRect(x: bounds.midX - size.width / 2,
-                            y: bounds.midY - size.height / 2,
-                            width: size.width, height: size.height)
+        if let image, image.size.width > 0, image.size.height > 0 {
+            NSGraphicsContext.current?.imageInterpolation = .high
+            let fraction: CGFloat = isMinimized ? 0.55 : 1
+            if isIcon {
+                let side = min(Self.iconSide, min(bounds.width, bounds.height) - 8)
+                let target = NSRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2,
+                                    width: side, height: side)
+                image.draw(in: target, from: .zero, operation: .sourceOver, fraction: fraction)
+            } else {
+                // Fit the whole window inside the box: cropping a screenshot
+                // would hide the very part that tells two windows apart.
+                let scale = min(bounds.width / image.size.width,
+                                bounds.height / image.size.height)
+                let size = NSSize(width: (image.size.width * scale).rounded(),
+                                  height: (image.size.height * scale).rounded())
+                let target = NSRect(x: (bounds.midX - size.width / 2).rounded(),
+                                    y: (bounds.midY - size.height / 2).rounded(),
+                                    width: size.width, height: size.height)
+                NSGraphicsContext.saveGraphicsState()
+                NSBezierPath(roundedRect: target, xRadius: 5, yRadius: 5).addClip()
+                image.draw(in: target, from: .zero, operation: .sourceOver, fraction: fraction)
+                NSGraphicsContext.restoreGraphicsState()
+            }
         }
 
-        NSGraphicsContext.current?.imageInterpolation = .high
-        image.draw(in: target, from: .zero, operation: .sourceOver, fraction: 1)
+        // An inner hairline so a capture with a white page does not bleed
+        // into a white tile edge, and an empty box still reads as a frame.
+        NSColor.white.withAlphaComponent(0.08).setStroke()
+        let edge = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: 8.5, yRadius: 8.5)
+        edge.lineWidth = 1
+        edge.stroke()
+
+        if isMinimized { drawMinimizedMark() }
+    }
+
+    /// A small dark disc with a dash: "this one is in the Dock".
+    private func drawMinimizedMark() {
+        let radius: CGFloat = 8
+        let center = NSPoint(x: bounds.maxX - radius - 6, y: bounds.minY + radius + 6)
+        let disc = NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
+                                               width: radius * 2, height: radius * 2))
+        NSColor(white: 0.12, alpha: 0.92).setFill()
+        disc.fill()
+        NSColor.white.withAlphaComponent(0.18).setStroke()
+        disc.lineWidth = 1
+        disc.stroke()
+
+        let dash = NSBezierPath()
+        dash.move(to: NSPoint(x: center.x - 4, y: center.y))
+        dash.line(to: NSPoint(x: center.x + 4, y: center.y))
+        dash.lineWidth = 1.6
+        dash.lineCapStyle = .round
+        NSColor.white.withAlphaComponent(0.85).setStroke()
+        dash.stroke()
     }
 }

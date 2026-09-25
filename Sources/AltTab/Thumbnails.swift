@@ -13,21 +13,46 @@ actor Thumbnails {
 
     /// Thumbnails are only ever drawn small, so capture small: a full-resolution
     /// grab of a 6K display costs far more than the picture is worth.
-    private static let maxSide: CGFloat = 480
+    private static let maxSide: CGFloat = 512
 
     private var cache: [CGWindowID: (image: NSImage, taken: Date)] = [:]
-    /// A window's contents change; a picture older than this is not worth showing.
-    private static let maxAge: TimeInterval = 20
+    /// Younger than this and a picture is simply reused; older, it is shown
+    /// while a fresh one is taken; past `maxAge` it is not shown at all.
+    private static let freshAge: TimeInterval = 1
+    private static let maxAge: TimeInterval = 30
 
-    /// Cached picture if it is recent enough, without capturing anything.
-    func cached(_ id: CGWindowID) -> NSImage? {
-        guard let hit = cache[id], Date().timeIntervalSince(hit.taken) < Self.maxAge
-        else { return nil }
-        return hit.image
+    /// Enumerating shareable content is the slow half of a capture — far
+    /// slower than the capture itself — and it was being done once per window.
+    /// Now once per pass. Stored untyped: a stored property cannot carry an
+    /// availability condition, and the type does not exist on macOS 13.
+    private var content: Any?
+    private var contentTaken = Date.distantPast
+    private static let contentAge: TimeInterval = 2
+
+    /// Every picture still worth showing, without capturing anything.
+    func cachedImages(for ids: [CGWindowID]) -> [CGWindowID: NSImage] {
+        let now = Date()
+        var result: [CGWindowID: NSImage] = [:]
+        for id in ids {
+            guard let hit = cache[id], now.timeIntervalSince(hit.taken) < Self.maxAge else { continue }
+            result[id] = hit.image
+        }
+        return result
+    }
+
+    /// Does the slow, shared part of a pass up front so the captures that
+    /// follow only pay for themselves.
+    func prepare() async {
+        guard Permissions.hasScreenRecording else { return }
+        if #available(macOS 14.0, *) {
+            _ = await shareableContent()
+        }
     }
 
     func image(for entry: WindowEntry) async -> NSImage? {
-        if let hit = cached(entry.id) { return hit }
+        if let hit = cache[entry.id], Date().timeIntervalSince(hit.taken) < Self.freshAge {
+            return hit.image
+        }
         guard Permissions.hasScreenRecording else { return nil }
 
         let image: NSImage?
@@ -36,8 +61,16 @@ actor Thumbnails {
         } else {
             image = captureLegacy(entry)
         }
-        if let image { cache[entry.id] = (image, Date()) }
-        return image
+        if let image {
+            cache[entry.id] = (image, Date())
+            return image
+        }
+        // A capture can fail for a window that just went away or changed
+        // Space; the last good picture is better than a blank tile.
+        if let hit = cache[entry.id], Date().timeIntervalSince(hit.taken) < Self.maxAge {
+            return hit.image
+        }
+        return nil
     }
 
     /// Drops pictures of windows that no longer exist, so a long-running app
@@ -49,17 +82,31 @@ actor Thumbnails {
     // MARK: - macOS 14+
 
     @available(macOS 14.0, *)
+    private func shareableContent() async -> SCShareableContent? {
+        if let cached = content as? SCShareableContent,
+           Date().timeIntervalSince(contentTaken) < Self.contentAge {
+            return cached
+        }
+        guard let fresh = try? await SCShareableContent.excludingDesktopWindows(
+            true, onScreenWindowsOnly: false)
+        else { return nil }
+        content = fresh
+        contentTaken = Date()
+        return fresh
+    }
+
+    @available(macOS 14.0, *)
     private func captureModern(_ entry: WindowEntry) async -> NSImage? {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(
-            true, onScreenWindowsOnly: false),
-            let window = content.windows.first(where: { $0.windowID == entry.id })
+        guard let content = await shareableContent(),
+              let window = content.windows.first(where: { $0.windowID == entry.id })
         else { return nil }
 
+        let frame = window.frame.isEmpty ? entry.frame : window.frame
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let config = SCStreamConfiguration()
-        let scale = min(1, Self.maxSide / max(entry.frame.width, entry.frame.height))
-        config.width = max(1, Int(entry.frame.width * scale))
-        config.height = max(1, Int(entry.frame.height * scale))
+        let scale = min(1, Self.maxSide / max(1, max(frame.width, frame.height)))
+        config.width = max(1, Int(frame.width * scale))
+        config.height = max(1, Int(frame.height * scale))
         config.showsCursor = false
         config.ignoreShadowsSingleWindow = true
 

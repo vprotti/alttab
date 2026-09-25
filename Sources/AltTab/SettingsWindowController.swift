@@ -6,10 +6,17 @@ import Carbon.HIToolbox
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private let onShortcutChanged: () -> Void
+    private let onRecordingChanged: (Bool) -> Void
 
+    private var appNameLabel: NSTextField!
+    private var versionLabel: NSTextField!
+    private var taglineLabel: NSTextField!
     private var shortcutButton: ShortcutRecorder!
     private var minimizedSwitch: NSSwitch!
     private var minimizedLabel: NSTextField!
+    private var otherSpacesSwitch: NSSwitch!
+    private var otherSpacesLabel: NSTextField!
+    private var otherSpacesHint: NSTextField!
     private var loginSwitch: NSSwitch!
     private var loginLabel: NSTextField!
     private var loginHint: NSTextField!
@@ -26,8 +33,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var privacyTitle: NSTextField!
     private var privacyBody: NSTextField!
 
-    init(onShortcutChanged: @escaping () -> Void) {
+    init(onShortcutChanged: @escaping () -> Void,
+         onRecordingChanged: @escaping (Bool) -> Void) {
         self.onShortcutChanged = onShortcutChanged
+        self.onRecordingChanged = onRecordingChanged
         super.init()
         NotificationCenter.default.addObserver(
             self, selector: #selector(relabel), name: .languageDidChange, object: nil)
@@ -48,11 +57,41 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         win.isReleasedWhenClosed = false
         win.delegate = self
 
+        // The mark, the name and the version, so the window says what it is
+        // before the first control.
+        let mark = NSImageView()
+        mark.image = StatusIcons.large
+        mark.imageScaling = .scaleProportionallyUpOrDown
+        mark.translatesAutoresizingMaskIntoConstraints = false
+
+        appNameLabel = NSTextField(labelWithString: "AltTab")
+        appNameLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        versionLabel = Self.label()
+        versionLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        versionLabel.textColor = .secondaryLabelColor
+        taglineLabel = Self.label()
+        taglineLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        taglineLabel.textColor = .secondaryLabelColor
+
+        let headerText = NSStackView(views: [appNameLabel, versionLabel, taglineLabel])
+        headerText.orientation = .vertical
+        headerText.alignment = .leading
+        headerText.spacing = 2
+        headerText.setCustomSpacing(6, after: versionLabel)
+
+        let header = NSStackView(views: [mark, headerText])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 14
+
         shortcutLabel = Self.label()
         shortcutButton = ShortcutRecorder()
         shortcutButton.onCapture = { [weak self] shortcut in
             Prefs.shortcut = shortcut
             self?.onShortcutChanged()
+        }
+        shortcutButton.onRecordingChanged = { [weak self] recording in
+            self?.onRecordingChanged(recording)
         }
 
         shortcutHint = Self.hint()
@@ -60,6 +99,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         minimizedSwitch = NSSwitch()
         minimizedSwitch.target = self
         minimizedSwitch.action = #selector(minimizedChanged)
+
+        otherSpacesLabel = Self.label()
+        otherSpacesSwitch = NSSwitch()
+        otherSpacesSwitch.target = self
+        otherSpacesSwitch.action = #selector(otherSpacesChanged)
+        otherSpacesHint = Self.hint()
 
         loginLabel = Self.label()
         loginSwitch = NSSwitch()
@@ -92,6 +137,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             [shortcutLabel, shortcutButton],
             [shortcutHint, NSGridCell.emptyContentView],
             [minimizedLabel, minimizedSwitch],
+            [otherSpacesLabel, otherSpacesSwitch],
+            [otherSpacesHint, NSGridCell.emptyContentView],
             [loginLabel, loginSwitch],
             [loginHint, NSGridCell.emptyContentView],
             [updateLabel, updateSwitch],
@@ -107,7 +154,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         grid.column(at: 1).xPlacement = .leading
         grid.rowAlignment = .firstBaseline
 
-        for wide in [shortcutHint!, loginHint!, updateHint!, privacyTitle!, privacyBody!] {
+        for wide in [shortcutHint!, otherSpacesHint!, loginHint!, updateHint!, privacyTitle!, privacyBody!] {
             grid.cell(for: wide)?.row?.mergeCells(in: NSRange(location: 0, length: 2))
             grid.cell(for: wide)?.xPlacement = .leading
         }
@@ -115,20 +162,31 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         loginHintRow = grid.cell(for: loginHint)?.row
         loginHintRow?.isHidden = true
 
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+
+        let column = NSStackView(views: [header, separator, grid])
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 18
+        column.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 24, right: 24)
+        column.translatesAutoresizingMaskIntoConstraints = false
+
         let content = NSView()
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(grid)
+        content.addSubview(column)
         NSLayoutConstraint.activate([
-            grid.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            grid.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24),
-            grid.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 24),
-            grid.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -24),
-            grid.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            mark.widthAnchor.constraint(equalToConstant: 48),
+            mark.heightAnchor.constraint(equalToConstant: 48),
+            separator.widthAnchor.constraint(equalTo: grid.widthAnchor),
+            column.topAnchor.constraint(equalTo: content.topAnchor),
+            column.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            column.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            column.trailingAnchor.constraint(equalTo: content.trailingAnchor),
         ])
         win.contentView = content
         window = win
         relabel()
-        win.setContentSize(content.fittingSize)
     }
 
     private static func label() -> NSTextField { NSTextField(labelWithString: "") }
@@ -142,9 +200,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     @objc private func relabel() {
+        versionLabel.stringValue = "\(L10n.t("settings.version")) \(Updater.currentVersion)"
+        taglineLabel.stringValue = L10n.t("welcome.hint")
         shortcutLabel.stringValue = L10n.t("settings.shortcut")
         shortcutHint.stringValue = L10n.t("settings.shortcutHint")
         minimizedLabel.stringValue = L10n.t("settings.includeMinimized")
+        otherSpacesLabel.stringValue = L10n.t("settings.includeOtherSpaces")
+        otherSpacesHint.stringValue = L10n.t("settings.otherSpacesHint")
         loginLabel.stringValue = L10n.t("settings.launchAtLogin")
         loginHint.stringValue = L10n.t("settings.loginHint")
         updateLabel.stringValue = L10n.t("settings.autoUpdate")
@@ -156,19 +218,38 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         privacyBody.stringValue = L10n.t("settings.privacyBody")
         shortcutButton.refreshTitle()
         window?.title = L10n.t("settings.title")
+        resizeToFit()
+    }
+
+    /// The strings change length with the language and the login hint comes
+    /// and goes; the window follows, keeping its top edge where it is.
+    private func resizeToFit() {
+        guard let window, let content = window.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        let size = content.fittingSize
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin.x = window.frame.origin.x
+        frame.origin.y = window.frame.maxY - frame.height
+        window.setFrame(frame, display: true)
     }
 
     private func syncFromState() {
         loginHintRow?.isHidden = true
         shortcutButton.shortcut = Prefs.shortcut
         minimizedSwitch.state = Prefs.includeMinimized ? .on : .off
+        otherSpacesSwitch.state = Prefs.includeOtherSpaces ? .on : .off
         loginSwitch.state = LoginItem.isEnabled ? .on : .off
         updateSwitch.state = Prefs.autoUpdate ? .on : .off
         languagePopup.selectItem(at: L10n.current == .ptBR ? 0 : 1)
+        resizeToFit()
     }
 
     @objc private func minimizedChanged() {
         Prefs.includeMinimized = minimizedSwitch.state == .on
+    }
+
+    @objc private func otherSpacesChanged() {
+        Prefs.includeOtherSpaces = otherSpacesSwitch.state == .on
     }
 
     @objc private func loginChanged() {
@@ -176,7 +257,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let ok = LoginItem.set(enabled: wanted)
         if !ok && wanted { loginSwitch.state = .off }
         loginHintRow?.isHidden = !(!ok && wanted)
-        if let content = window?.contentView { window?.setContentSize(content.fittingSize) }
+        resizeToFit()
     }
 
     @objc private func autoUpdateChanged() {
@@ -191,17 +272,34 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     @objc private func openPermissions() {
         Permissions.openAccessibilitySettings()
     }
+
+    // MARK: - NSWindowDelegate
+
+    /// A recording left half-way when the window loses the keyboard would
+    /// keep the switcher's shortcut suspended with nothing on screen to say so.
+    func windowDidResignKey(_ notification: Notification) {
+        shortcutButton?.stopRecording()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        shortcutButton?.stopRecording()
+    }
 }
 
 /// Click, then press the combination you want. Records the modifier that has to
 /// stay held plus the key that cycles.
 final class ShortcutRecorder: NSButton {
     var onCapture: ((Shortcut) -> Void)?
+    /// True while waiting for a key; the global shortcut is paused meanwhile.
+    var onRecordingChanged: ((Bool) -> Void)?
     var shortcut: Shortcut = .default {
         didSet { refreshTitle() }
     }
     private var recording = false {
-        didSet { refreshTitle() }
+        didSet {
+            refreshTitle()
+            if recording != oldValue { onRecordingChanged?(recording) }
+        }
     }
 
     init() {
@@ -216,6 +314,10 @@ final class ShortcutRecorder: NSButton {
 
     func refreshTitle() {
         title = recording ? L10n.t("settings.recording") : shortcut.display
+    }
+
+    func stopRecording() {
+        recording = false
     }
 
     @objc private func startRecording() {

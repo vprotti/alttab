@@ -11,7 +11,7 @@ ROOT="$PWD"
 
 # Single source of truth for the release version: stamped into the
 # bundle here and published to the update manifest by dmg.sh.
-APP_VERSION="${APP_VERSION:-1.0.1}"
+APP_VERSION="${APP_VERSION:-1.1.0}"
 DIST="$ROOT/dist"
 APP="$DIST/AltTab.app"
 
@@ -31,14 +31,22 @@ if [[ "$ARCHS" != *arm64* || "$ARCHS" != *x86_64* ]]; then
   echo "error: expected universal binary, got: $ARCHS" >&2
   exit 1
 fi
-# assetgen only runs on this machine — host arch is fine.
-BIN_PATH="$BIN_ARM"
+# assetgen only runs on this machine, so it has to be the host's own slice:
+# the arm64 one does not start on an Intel Mac.
+case "$(uname -m)" in
+  arm64) BIN_PATH="$BIN_ARM" ;;
+  *)     BIN_PATH="$BIN_X86" ;;
+esac
 
 echo "==> Generating artwork (assetgen)"
 mkdir -p "$DIST"
 "$BIN_PATH/assetgen" icon "$DIST/icon-1024.png"
 "$BIN_PATH/assetgen" dmg-background "$DIST/dmg-bg.png"
-"$BIN_PATH/assetgen" web "$ROOT/../../www/assets"
+# The web icons belong to the nasmac.app monorepo. A standalone clone has no
+# such folder, and must not have one created two levels above itself.
+if [ -d "$ROOT/../../www" ]; then
+  "$BIN_PATH/assetgen" web "$ROOT/../../www/assets"
+fi
 
 echo "==> Building AltTab.icns"
 ICONSET="$DIST/AltTab.iconset"
