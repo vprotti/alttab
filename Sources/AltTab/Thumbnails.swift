@@ -11,20 +11,23 @@ import ScreenCaptureKit
 actor Thumbnails {
     static let shared = Thumbnails()
 
-    /// Thumbnails are only ever drawn small, so capture small: a full-resolution
-    /// grab of a 6K display costs far more than the picture is worth.
-    private static let maxSide: CGFloat = 512
+    /// A tile is at most about 160 points wide, so this covers a Retina tile
+    /// with room to spare, and a full grid of pictures stays a few megabytes
+    /// instead of a few hundred.
+    private static let maxSide: CGFloat = 400
 
     private var cache: [CGWindowID: (image: NSImage, taken: Date)] = [:]
-    /// Younger than this and a picture is simply reused; older, it is shown
-    /// while a fresh one is taken; past `maxAge` it is not shown at all.
+    /// Younger than this and a picture is reused as it is.
     private static let freshAge: TimeInterval = 1
-    private static let maxAge: TimeInterval = 30
+    /// A window behind another tab, on another desktop or in the Dock often
+    /// cannot be captured at all, or comes back as an empty frame. Its last
+    /// good picture still tells it apart far better than an icon, this long.
+    private static let maxAge: TimeInterval = 600
 
     /// Enumerating shareable content is the slow half of a capture — far
-    /// slower than the capture itself — and it was being done once per window.
-    /// Now once per pass. Stored untyped: a stored property cannot carry an
-    /// availability condition, and the type does not exist on macOS 13.
+    /// slower than the capture itself — so it is done once per pass. Stored
+    /// untyped: a stored property cannot carry an availability condition, and
+    /// the type does not exist on macOS 13.
     private var content: Any?
     private var contentTaken = Date.distantPast
     private static let contentAge: TimeInterval = 2
@@ -55,18 +58,16 @@ actor Thumbnails {
         }
         guard Permissions.hasScreenRecording else { return nil }
 
-        let image: NSImage?
+        let captured: CGImage?
         if #available(macOS 14.0, *) {
-            image = await captureModern(entry)
+            captured = await captureModern(entry)
         } else {
-            image = captureLegacy(entry)
+            captured = captureLegacy(entry)
         }
-        if let image {
+        if let captured, let image = Self.usable(captured) {
             cache[entry.id] = (image, Date())
             return image
         }
-        // A capture can fail for a window that just went away or changed
-        // Space; the last good picture is better than a blank tile.
         if let hit = cache[entry.id], Date().timeIntervalSince(hit.taken) < Self.maxAge {
             return hit.image
         }
@@ -96,7 +97,7 @@ actor Thumbnails {
     }
 
     @available(macOS 14.0, *)
-    private func captureModern(_ entry: WindowEntry) async -> NSImage? {
+    private func captureModern(_ entry: WindowEntry) async -> CGImage? {
         guard let content = await shareableContent(),
               let window = content.windows.first(where: { $0.windowID == entry.id })
         else { return nil }
@@ -110,22 +111,74 @@ actor Thumbnails {
         config.showsCursor = false
         config.ignoreShadowsSingleWindow = true
 
-        guard let cgImage = try? await SCScreenshotManager.captureImage(
-            contentFilter: filter, configuration: config)
-        else { return nil }
-        return NSImage(cgImage: cgImage, size: .zero)
+        return try? await SCScreenshotManager.captureImage(contentFilter: filter,
+                                                           configuration: config)
     }
 
     // MARK: - macOS 13
 
-    private func captureLegacy(_ entry: WindowEntry) -> NSImage? {
+    private func captureLegacy(_ entry: WindowEntry) -> CGImage? {
         // Deprecated since macOS 14 and returns nothing without permission, but
-        // it is the only single-shot window capture that exists on 13.
-        guard let cgImage = CGWindowListCreateImage(
+        // it is the only single-shot window capture that exists on 13. It comes
+        // back at full size, which is why it is scaled down before it is kept.
+        guard let image = CGWindowListCreateImage(
             .null, .optionIncludingWindow, entry.id,
-            [.boundsIgnoreFraming, .nominalResolution]),
-            cgImage.width > 1, cgImage.height > 1
+            [.boundsIgnoreFraming, .nominalResolution])
         else { return nil }
-        return NSImage(cgImage: cgImage, size: .zero)
+        return Self.downscaled(image)
+    }
+
+    // MARK: - Checking what came back
+
+    private static func usable(_ image: CGImage) -> NSImage? {
+        guard image.width > 1, image.height > 1, !isBlank(image) else { return nil }
+        return NSImage(cgImage: image, size: .zero)
+    }
+
+    /// A window the window server is not drawing — a tab behind another, one
+    /// on a desktop it has not composited lately — can capture as a frame of
+    /// pure black or pure nothing. Shown, that reads as a broken tile.
+    ///
+    /// Judged on an 8×8 reduction: any real window has at least a title bar
+    /// or an edge that is neither transparent nor black.
+    private static func isBlank(_ image: CGImage) -> Bool {
+        let side = 8
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        guard drawn else { return false }
+
+        var opaque = false
+        var lit = false
+        for index in stride(from: 0, to: pixels.count, by: 4) {
+            if pixels[index + 3] > 2 { opaque = true }
+            if pixels[index] > 2 || pixels[index + 1] > 2 || pixels[index + 2] > 2 { lit = true }
+            if opaque && lit { return false }
+        }
+        return true
+    }
+
+    private static func downscaled(_ image: CGImage) -> CGImage {
+        let longest = CGFloat(max(image.width, image.height))
+        guard longest > maxSide else { return image }
+        let scale = maxSide / longest
+        let width = max(1, Int(CGFloat(image.width) * scale))
+        let height = max(1, Int(CGFloat(image.height) * scale))
+        guard let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return image }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage() ?? image
     }
 }

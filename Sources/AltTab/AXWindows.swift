@@ -17,6 +17,9 @@ import ApplicationServices
 ///  2. Matching on position and title. Public, and right almost always; it can
 ///     only be confused by two windows of the same app sharing a title *and* a
 ///     frame, in which case either one is a reasonable answer anyway.
+///
+/// Accessibility only ever sees the desktop in front of you. Windows on the
+/// others are the window server's business, in `SkyLight`.
 enum AXWindows {
 
     // MARK: - The private id lookup, obtained safely
@@ -78,31 +81,83 @@ enum AXWindows {
 
         /// A document or dialog window, as opposed to a floating helper, a
         /// popup bubble or something the app never meant anyone to switch to.
-        var isStandard: Bool {
+        /// A hidden app's windows, and minimised ones, report as dialogs.
+        var isWindowLike: Bool {
             subrole == kAXStandardWindowSubrole || subrole == kAXDialogSubrole
         }
     }
 
-    /// Everything the switcher wants to know about a process's windows, keyed
-    /// by window id, in one round trip per window rather than one per
-    /// attribute. The window server's off-screen list is not a list of
-    /// minimised windows — it is everything not currently drawn, which for a
-    /// browser means a pile of 1224×88 extension popups and hidden helpers —
-    /// so the app itself is asked which of its windows are real.
-    static func snapshot(pid: pid_t) -> [CGWindowID: Info] {
-        var result: [CGWindowID: Info] = [:]
+    /// Everything one process said about its windows on this desktop.
+    struct Snapshot {
+        var byID: [CGWindowID: Info] = [:]
+        /// Windows the id bridge could not name, kept with their frames so
+        /// they can still be matched.
+        var unnamed: [(frame: CGRect, info: Info)] = []
+
+        func info(for id: CGWindowID, frame: CGRect, title: String) -> Info? {
+            if let hit = byID[id] { return hit }
+            guard !unnamed.isEmpty else { return nil }
+            let near = unnamed.filter { Self.same($0.frame, frame) }
+            if !title.isEmpty, let named = near.first(where: { $0.info.title == title }) {
+                return named.info
+            }
+            return near.count == 1 ? near[0].info : nil
+        }
+
+        private static func same(_ a: CGRect, _ b: CGRect) -> Bool {
+            abs(a.minX - b.minX) < 2 && abs(a.minY - b.minY) < 2
+                && abs(a.width - b.width) < 2 && abs(a.height - b.height) < 2
+        }
+    }
+
+    /// One snapshot per process, all asked at once. Asked one after another,
+    /// a single slow app held up every app behind it, and the grid with them.
+    static func snapshots(for pids: [pid_t]) -> [pid_t: Snapshot] {
+        guard !pids.isEmpty else { return [:] }
+        let store = SnapshotStore()
+        DispatchQueue.concurrentPerform(iterations: pids.count) { index in
+            store.set(snapshot(pid: pids[index]), for: pids[index])
+        }
+        return store.values
+    }
+
+    private final class SnapshotStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [pid_t: Snapshot] = [:]
+
+        func set(_ snapshot: Snapshot, for pid: pid_t) {
+            lock.lock()
+            stored[pid] = snapshot
+            lock.unlock()
+        }
+
+        var values: [pid_t: Snapshot] {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+    }
+
+    /// Title, minimised state and kind of every window, in one round trip per
+    /// window rather than one per attribute.
+    static func snapshot(pid: pid_t) -> Snapshot {
+        var result = Snapshot()
         let attributes = [kAXTitleAttribute, kAXMinimizedAttribute, kAXSubroleAttribute] as CFArray
         for window in windows(pid: pid) {
-            guard let id = windowID(of: window) else { continue }
             var values: CFArray?
             guard AXUIElementCopyMultipleAttributeValues(window, attributes, [], &values) == .success,
                   let array = values as? [Any], array.count == 3
             else { continue }
             // A value the app could not supply comes back as an AXValue error
             // placeholder, which fails every cast below exactly as intended.
-            result[id] = Info(title: array[0] as? String,
-                              isMinimized: (array[1] as? Bool) ?? false,
-                              subrole: array[2] as? String)
+            let info = Info(title: array[0] as? String,
+                            isMinimized: (array[1] as? Bool) ?? false,
+                            subrole: array[2] as? String)
+            if let id = windowID(of: window) {
+                result.byID[id] = info
+            } else if let bounds = frame(of: window) {
+                result.unnamed.append((frame: bounds, info: info))
+            }
         }
         return result
     }
@@ -113,10 +168,11 @@ enum AXWindows {
         let candidates = windows(pid: entry.pid)
         guard !candidates.isEmpty else { return nil }
 
+        // The id cannot be confused. A window its app does not list under that
+        // id is on another desktop, out of Accessibility's sight, and matching
+        // on title or position would raise a different window of the same app.
         if getWindowID != nil {
-            if let match = candidates.first(where: { windowID(of: $0) == entry.id }) {
-                return match
-            }
+            return candidates.first { windowID(of: $0) == entry.id }
         }
 
         // Fallback: same title and same origin wins; then title alone; then, if
@@ -140,41 +196,71 @@ enum AXWindows {
         return point
     }
 
+    private static func size(of window: AXUIElement) -> CGSize? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &value) == .success,
+              let axValue = value, CFGetTypeID(axValue) == AXValueGetTypeID()
+        else { return nil }
+        var extent = CGSize.zero
+        AXValueGetValue(axValue as! AXValue, .cgSize, &extent)
+        return extent
+    }
+
+    private static func frame(of window: AXUIElement) -> CGRect? {
+        guard let point = origin(of: window), let extent = size(of: window) else { return nil }
+        return CGRect(origin: point, size: extent)
+    }
+
     // MARK: - Acting
 
     /// Brings one window forward and gives it the keyboard.
     ///
-    /// The order matters and all the steps are needed: un-minimise so the
-    /// window exists on screen at all, raise it above its app's other windows,
-    /// then bring the app forward so the keyboard follows. Activating first
-    /// would bring up whichever window that app had in front, not this one.
-    ///
-    /// The app is brought forward two ways. Setting `AXFrontmost` works from
-    /// a background process on every macOS this app runs on; the AppKit
-    /// activation is also asked, because it is the one that unhides an app
-    /// hidden with ⌘H and switches Spaces reliably.
-    @discardableResult
-    static func focus(_ entry: WindowEntry) -> Bool {
-        guard let window = element(for: entry) else {
-            // No accessibility element — the best that is left is the app.
-            DispatchQueue.main.async {
-                entry.app?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            }
-            return false
-        }
+    /// The window has to exist on screen first: its app is unhidden, and the
+    /// window taken out of the Dock. Then the window server is asked to put
+    /// this exact window in front, which is the one call that also reaches a
+    /// window on another desktop or behind another tab. Accessibility raises
+    /// it within its app on top of that. When the window server calls are
+    /// missing, the app is activated the ordinary way.
+    static func focus(_ entry: WindowEntry) {
+        let app = entry.app
+        if app?.isHidden == true { app?.unhide() }
 
-        if attribute(window, kAXMinimizedAttribute, as: Bool.self) == true {
-            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-        }
-        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
-        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
+        let window = element(for: entry)
+        if let window { restore(window) }
+
+        let fronted = SkyLight.focus(pid: entry.pid, windowID: entry.id)
+        if let window { raise(window) }
         AXUIElementSetAttributeValue(appElement(pid: entry.pid),
                                      kAXFrontmostAttribute as CFString, true as CFTypeRef)
 
-        DispatchQueue.main.async {
-            entry.app?.activate(options: [.activateIgnoringOtherApps])
+        if !fronted {
+            let options: NSApplication.ActivationOptions = window == nil
+                ? [.activateAllWindows, .activateIgnoringOtherApps]
+                : [.activateIgnoringOtherApps]
+            DispatchQueue.main.async { app?.activate(options: options) }
         }
-        return true
+
+        // A window on another desktop only becomes visible to Accessibility
+        // once macOS has switched there. Raise it then, unless the user has
+        // already moved on to something else.
+        guard window == nil else { return }
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.4) {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == entry.pid,
+                  let late = Self.element(for: entry)
+            else { return }
+            Self.restore(late)
+            Self.raise(late)
+        }
+    }
+
+    private static func restore(_ window: AXUIElement) {
+        guard attribute(window, kAXMinimizedAttribute, as: Bool.self) == true else { return }
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+    }
+
+    private static func raise(_ window: AXUIElement) {
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
     }
 }

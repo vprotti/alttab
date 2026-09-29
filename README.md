@@ -26,11 +26,13 @@ O AltTab mostra os dois, com o título de cada janela e uma prévia do que tem d
 
 ## Como funciona
 
-Cada linha é uma janela de verdade, na ordem em que estão empilhadas na tela — então um ⌥Tab sozinho volta para a janela de onde você acabou de sair.
+Cada linha é uma janela de verdade, na ordem em que foram usadas — então um ⌥Tab sozinho volta para a janela de onde você acabou de sair, mesmo que ela esteja em outra mesa.
 
 - **Prévia de cada janela**, capturada na hora e sempre no mesmo tamanho.
+- **Abas também são janelas**: cada aba do Finder, do Terminal, do Xcode ou de qualquer app com as abas do macOS ganha a própria linha.
+- **Todas as mesas**: janelas de outras mesas e de apps em tela cheia entram, e escolher uma leva você direto até ela. Apps ocultos com ⌘H também (dá para desligar).
 - **Janelas minimizadas** entram na lista (dá para desligar), confirmadas com o app dono — a lista bruta do sistema mistura popups de extensão e janelas auxiliares que ninguém quer ver.
-- **Janelas de outras mesas** e de apps ocultos com ⌘H também entram (dá para desligar) — são justamente as mais difíceis de alcançar de outro jeito.
+- **Apps da barra de menus** aparecem quando abrem uma janela de verdade, como a de ajustes — os popovers ficam de fora.
 - **Um toque rápido** em ⌥Tab volta direto para a janela anterior, sem nem mostrar a grade.
 - **⇧Tab** volta, **setas** navegam, **Esc** cancela, **Enter** confirma, **clique** escolhe direto.
 - **Atalho configurável**: ⌥ Tab de fábrica, mas pode ser ⌃ ou ⌘ com outra tecla.
@@ -88,11 +90,17 @@ A lista de janelas cruza duas fontes. O `CGWindowListCopyWindowInfo` dá a ordem
 
 Ligar as duas exige traduzir um `CGWindowID` para um `AXUIElement`, o que a API pública não oferece. O `_AXUIElementGetWindow` faz isso e é resolvido em tempo de execução — se a Apple removê-lo um dia, o app cai para casar por título e posição, sem quebrar.
 
-Prévias vêm do ScreenCaptureKit no macOS 14+ e da API antiga no 13, capturadas **depois** que a grade já apareceu, uma a uma — capturar tudo antes atrasaria a abertura, que é justamente o que faz um alternador parecer quebrado.
+A Acessibilidade só enxerga a mesa que está na tela. Para as outras mesas e os apps em tela cheia, o AltTab pergunta ao próprio servidor de janelas (SkyLight) em que mesa cada janela está desenhada, e é ele também que traz a janela escolhida para a frente, trocando de mesa se preciso. São chamadas privadas, resolvidas em tempo de execução do mesmo jeito: se sumirem, o app volta a enxergar só a mesa atual.
+
+Cada janela é julgada pelas três fontes juntas, em `WindowRules.swift`, que não depende de AppKit e dá para ler de uma vez. Quando alguma não aparece, o `--selftest-windows` lista também as que ficaram de fora e o motivo de cada uma.
+
+Prévias vêm do ScreenCaptureKit no macOS 14+ e da API antiga no 13, capturadas **depois** que a grade já apareceu, algumas por vez — capturar tudo antes atrasaria a abertura, que é justamente o que faz um alternador parecer quebrado.
 
 ```
 Sources/AltTab/WindowList.swift      quais janelas existem
+Sources/AltTab/WindowRules.swift     quais entram, e em que ordem
 Sources/AltTab/AXWindows.swift       a ponte com a Acessibilidade
+Sources/AltTab/SkyLight.swift        as outras mesas, e o foco exato
 Sources/AltTab/Hotkey.swift          segurar, ciclar, soltar
 Sources/AltTab/SwitcherPanel.swift   a grade
 Sources/AltTab/Thumbnails.swift      as prévias

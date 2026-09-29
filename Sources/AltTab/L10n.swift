@@ -81,8 +81,8 @@ enum L10n {
         "settings.includeOtherSpaces": (en: "Include windows on other desktops",
                                         pt: "Incluir janelas de outras mesas"),
         "settings.otherSpacesHint": (
-            en: "Also lists windows on other Spaces and of apps hidden with ⌘H.",
-            pt: "Lista também janelas de outras mesas e de apps ocultos com ⌘H."),
+            en: "Also lists windows on other desktops, full-screen apps and apps hidden with ⌘H. Picking one takes you to its desktop.",
+            pt: "Lista também janelas de outras mesas, apps em tela cheia e apps ocultos com ⌘H. Escolher uma leva você até a mesa dela."),
         "settings.version": (en: "Version", pt: "Versão"),
         "settings.launchAtLogin": (en: "Launch at login", pt: "Iniciar com o Mac"),
         "settings.loginHint": (en: "Move AltTab to the Applications folder to enable this.",

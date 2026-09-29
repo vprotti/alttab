@@ -26,11 +26,13 @@ AltTab shows both, with each window's own title and a preview of what is in it.
 
 ## How it behaves
 
-Every row is a real window, in the order they are stacked on screen — so a single ⌥Tab takes you back to the window you just came from.
+Every row is a real window, in the order they were used — so a single ⌥Tab takes you back to the window you just came from, even when it is on another desktop.
 
 - **A preview of each window**, captured live and always at the same size.
+- **Tabs are windows too**: every tab of Finder, Terminal, Xcode or any app using macOS tabs gets its own row.
+- **Every desktop**: windows on other desktops and full-screen apps are included, and picking one takes you straight to it. Apps hidden with ⌘H too (you can turn that off).
 - **Minimized windows** are included (you can turn that off), confirmed with the app that owns them — the system's raw list mixes in extension popups and helper windows nobody wants to see.
-- **Windows on other desktops** and of apps hidden with ⌘H are included too (you can turn that off) — they are exactly the ones hardest to reach any other way.
+- **Menu bar apps** show up when they open a real window, such as their settings — their popovers stay out.
 - **A quick tap** of ⌥Tab goes straight back to the previous window, without even showing the grid.
 - **⇧Tab** goes back, **arrows** navigate, **Esc** cancels, **Enter** confirms, **click** picks directly.
 - **Configurable shortcut**: ⌥ Tab out of the box, or ⌃ or ⌘ with a key of your choosing.
@@ -88,11 +90,17 @@ The window list crosses two sources. `CGWindowListCopyWindowInfo` gives the stac
 
 Joining the two means translating a `CGWindowID` into an `AXUIElement`, which the public API does not offer. `_AXUIElementGetWindow` does, and is resolved at runtime — if Apple ever removes it, the app falls back to matching on title and position instead of breaking.
 
-Previews come from ScreenCaptureKit on macOS 14+ and the older API on 13, captured **after** the grid is already on screen, one at a time — grabbing them all up front would delay the panel by exactly the amount that makes a switcher feel broken.
+Accessibility only sees the desktop on screen. For the other desktops and full-screen apps, AltTab asks the window server itself (SkyLight) which desktop each window is drawn on, and the window server is also what brings the chosen window forward, switching desktop when needed. These are private calls, resolved at runtime the same way: if they ever go away, the app goes back to seeing only the current desktop.
+
+Each window is judged on all three sources together, in `WindowRules.swift`, which has no AppKit in it and reads in one go. When a window goes missing, `--selftest-windows` also lists the ones that were left out, with the reason for each.
+
+Previews come from ScreenCaptureKit on macOS 14+ and the older API on 13, captured **after** the grid is already on screen, a few at a time — grabbing them all up front would delay the panel by exactly the amount that makes a switcher feel broken.
 
 ```
 Sources/AltTab/WindowList.swift      which windows exist
+Sources/AltTab/WindowRules.swift     which ones make it, and in what order
 Sources/AltTab/AXWindows.swift       the bridge to Accessibility
+Sources/AltTab/SkyLight.swift        other desktops, and exact focus
 Sources/AltTab/Hotkey.swift          hold, cycle, release
 Sources/AltTab/SwitcherPanel.swift   the grid
 Sources/AltTab/Thumbnails.swift      the previews

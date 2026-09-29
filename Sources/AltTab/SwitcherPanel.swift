@@ -110,9 +110,11 @@ private final class SwitcherContentView: NSVisualEffectView {
     private static let captionBlock: CGFloat = 14 + 18 + 18
 
     /// Each step down in size buys wider rows: at full size six tiles across
-    /// is the most the eye takes in; at two thirds it can read nine.
+    /// is the most the eye takes in; at two thirds it can read nine. The last
+    /// steps exist for the day every desktop and every tab adds up to forty
+    /// windows on a laptop screen.
     private static let sizes: [(scale: CGFloat, maxColumns: Int)] = [
-        (1.0, 6), (0.88, 7), (0.76, 8), (0.64, 9),
+        (1.0, 6), (0.88, 7), (0.76, 8), (0.64, 9), (0.52, 10), (0.44, 12),
     ]
 
     private let rows = NSStackView()
@@ -315,7 +317,7 @@ private final class SwitcherTileView: NSView {
         // rather than at whatever its natural resolution happens to be — that
         // is what made some tiles show a postage stamp and others a full frame.
         preview.setIcon(entry.icon)
-        preview.isMinimized = entry.isMinimized
+        preview.kind = entry.kind
         preview.translatesAutoresizingMaskIntoConstraints = false
 
         iconView.image = entry.icon
@@ -416,11 +418,13 @@ private final class PreviewView: NSView {
     private var image: NSImage?
     private var isIcon = true
 
-    /// A minimised window is drawn dimmed, with a small mark in the corner, so
-    /// it is plainly not one of the windows on screen right now.
-    var isMinimized = false {
+    /// A minimised window, or one whose app is hidden, is drawn dimmed with a
+    /// small mark in the corner, so it is plainly not on screen right now.
+    var kind: WindowEntry.Kind = .onScreen {
         didSet { needsDisplay = true }
     }
+
+    private var isParked: Bool { kind == .minimized || kind == .hidden }
 
     /// How much of the box an icon takes when there is no capture yet.
     private static let iconSide: CGFloat = 56
@@ -444,7 +448,7 @@ private final class PreviewView: NSView {
 
         if let image, image.size.width > 0, image.size.height > 0 {
             NSGraphicsContext.current?.imageInterpolation = .high
-            let fraction: CGFloat = isMinimized ? 0.55 : 1
+            let fraction: CGFloat = isParked ? 0.55 : 1
             if isIcon {
                 let side = min(Self.iconSide, min(bounds.width, bounds.height) - 8)
                 let target = NSRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2,
@@ -475,11 +479,16 @@ private final class PreviewView: NSView {
         edge.lineWidth = 1
         edge.stroke()
 
-        if isMinimized { drawMinimizedMark() }
+        switch kind {
+        case .minimized: drawBadge("minus")
+        case .hidden: drawBadge("eye.slash")
+        default: break
+        }
     }
 
-    /// A small dark disc with a dash: "this one is in the Dock".
-    private func drawMinimizedMark() {
+    /// A small dark disc in the corner saying why the window is dimmed: a
+    /// dash for the Dock, a crossed eye for a hidden app.
+    private func drawBadge(_ symbol: String) {
         let radius: CGFloat = 8
         let center = NSPoint(x: bounds.maxX - radius - 6, y: bounds.minY + radius + 6)
         let disc = NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
@@ -490,12 +499,15 @@ private final class PreviewView: NSView {
         disc.lineWidth = 1
         disc.stroke()
 
-        let dash = NSBezierPath()
-        dash.move(to: NSPoint(x: center.x - 4, y: center.y))
-        dash.line(to: NSPoint(x: center.x + 4, y: center.y))
-        dash.lineWidth = 1.6
-        dash.lineCapStyle = .round
-        NSColor.white.withAlphaComponent(0.85).setStroke()
-        dash.stroke()
+        let configuration = NSImage.SymbolConfiguration(pointSize: 8, weight: .bold)
+            .applying(NSImage.SymbolConfiguration(
+                paletteColors: [NSColor.white.withAlphaComponent(0.9)]))
+        guard let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(configuration)
+        else { return }
+        let size = glyph.size
+        glyph.draw(in: NSRect(x: (center.x - size.width / 2).rounded(),
+                              y: (center.y - size.height / 2).rounded(),
+                              width: size.width, height: size.height))
     }
 }

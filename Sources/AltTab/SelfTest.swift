@@ -4,20 +4,33 @@ import AppKit
 /// check the window list without launching the app. Not reachable from the UI.
 enum SelfTest {
 
-    /// `--selftest-windows`: what the switcher would list, right now.
-    /// The fastest way to tell whether the permissions are actually in place.
+    /// `--selftest-windows`: what the switcher would list, right now, and every
+    /// window it looked at and left out, with the reason. The fastest way to
+    /// tell whether the permissions are in place, and what to paste into an
+    /// issue when a window goes missing.
     static func printWindows() {
         print("Accessibility: \(Permissions.hasAccessibility ? "granted" : "MISSING")")
         print("Screen Recording: \(Permissions.hasScreenRecording ? "granted" : "missing (no previews, no titles)")")
+        print("Other desktops: \(SkyLight.membership() != nil ? "readable" : "UNREADABLE (only this desktop is listed)")")
+        print("Exact focus: \(SkyLight.canFocus ? "available" : "unavailable (the app is activated instead)")")
 
-        let entries = WindowList.current()
+        let scan = WindowList.scan(includeMinimized: true, includeOtherSpaces: true,
+                                   frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        let entries = scan.listing.entries
         print("\n\(entries.count) windows:\n")
         for (index, entry) in entries.enumerated() {
-            let size = "\(Int(entry.frame.width))×\(Int(entry.frame.height))"
-            let flag = entry.isMinimized ? " [minimized]" : ""
-            print(String(format: "%2d. %-22s %@%@",
+            print(String(format: "%2d. %-22s %-14s %@",
                          index + 1, (entry.appName as NSString).utf8String!,
-                         "\(entry.displayTitle)  (\(size))", flag))
+                         (label(entry.kind) as NSString).utf8String!,
+                         "\(entry.displayTitle)  (\(size(entry.frame)))"))
+        }
+
+        if !scan.rejected.isEmpty {
+            print("\nleft out, and why:\n")
+            for item in scan.rejected {
+                let title = item.title.isEmpty ? "untitled" : item.title
+                print("    \(item.appName): \(title)  (\(size(item.frame))) \u{2014} \(item.reason)")
+            }
         }
 
         // The point of the app, stated as a check: apps owning more than one
@@ -31,6 +44,20 @@ enum SelfTest {
             for (app, windows) in multi.sorted(by: { $0.value.count > $1.value.count }) {
                 print("  \(app): \(windows.count)")
             }
+        }
+    }
+
+    private static func size(_ frame: CGRect) -> String {
+        "\(Int(frame.width))\u{00D7}\(Int(frame.height))"
+    }
+
+    private static func label(_ kind: WindowEntry.Kind) -> String {
+        switch kind {
+        case .onScreen: return "on screen"
+        case .tab: return "tab"
+        case .otherDesktop: return "other desktop"
+        case .hidden: return "hidden app"
+        case .minimized: return "minimized"
         }
     }
 
@@ -93,7 +120,7 @@ enum SelfTest {
             WindowEntry(id: CGWindowID(1000 + index), pid: 0, appName: sample.0,
                         title: sample.1,
                         frame: CGRect(x: 0, y: 0, width: 1440, height: 900),
-                        isMinimized: false, icon: icon(sample.2))
+                        icon: icon(sample.2))
         }
         panel.show(entries: entries, selected: 1, on: NSScreen.main)
 

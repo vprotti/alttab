@@ -53,28 +53,33 @@ final class Switcher {
         let pass = generation
         let includeMinimized = Prefs.includeMinimized
         let includeOtherSpaces = Prefs.includeOtherSpaces
+        let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
         listing.async { [weak self] in
             // Accessibility calls live here, off the main thread, where they
             // cannot hold up the app or anything else on this Mac.
             let found = WindowList.current(includeMinimized: includeMinimized,
-                                           includeOtherSpaces: includeOtherSpaces)
+                                           includeOtherSpaces: includeOtherSpaces,
+                                           frontPID: frontPID)
             Task { @MainActor [weak self] in
                 self?.didList(found, pass: pass)
             }
         }
     }
 
-    private func didList(_ found: [WindowEntry], pass: Int) {
+    private func didList(_ found: WindowList.Listing, pass: Int) {
         guard pass == generation, phase == .listing else { return }
-        guard !found.isEmpty else { phase = .idle; return }
+        guard !found.entries.isEmpty else { phase = .idle; return }
 
-        entries = found
+        entries = found.entries
+        // The window you are in is, by definition, the one used last.
+        if found.firstIsCurrent { WindowHistory.shared.touch(entries[0].id) }
         // Start on the window behind the current one — a single press is "go
         // back to what I was just doing", as on Windows — plus whatever the
-        // user already pressed while the list was being gathered.
-        let start = found.count > 1 ? 1 : 0
-        selection = Self.wrap(start + pendingSteps, count: found.count)
+        // user already pressed while the list was being gathered. With no
+        // current window (an empty desktop) the first one is already "back".
+        let start = found.firstIsCurrent && entries.count > 1 ? 1 : 0
+        selection = Self.wrap(start + pendingSteps, count: entries.count)
         pendingSteps = 0
 
         if pendingCommit {
@@ -90,7 +95,7 @@ final class Switcher {
         }
 
         phase = .open
-        panel.show(entries: found, selected: selection, on: screenForPanel())
+        panel.show(entries: entries, selected: selection, on: screenForPanel())
         startWatchdog()
         startCaptures()
     }
@@ -128,6 +133,7 @@ final class Switcher {
     /// Focusing talks to another process; keep it off the frame that is
     /// dismissing the panel so the panel disappears immediately either way.
     private func focus(_ target: WindowEntry) {
+        WindowHistory.shared.touch(target.id)
         DispatchQueue.global(qos: .userInteractive).async { AXWindows.focus(target) }
     }
 

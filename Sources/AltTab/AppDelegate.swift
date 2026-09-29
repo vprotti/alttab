@@ -36,6 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             LoginItem.set(enabled: true)
         }
 
+        // Started before the first ⌥Tab, so the order of use across desktops
+        // is already known by the time anyone asks for it.
+        WindowHistory.shared.start()
+
         let switcher = Switcher()
         let hotkey = Hotkey(shortcut: Prefs.shortcut)
         // The switcher needs to know which modifier is holding it open, so it
