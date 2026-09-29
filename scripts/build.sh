@@ -42,10 +42,13 @@ echo "==> Generating artwork (assetgen)"
 mkdir -p "$DIST"
 "$BIN_PATH/assetgen" icon "$DIST/icon-1024.png"
 "$BIN_PATH/assetgen" dmg-background "$DIST/dmg-bg.png"
-# The web icons belong to the nasmac.app monorepo. A standalone clone has no
-# such folder, and must not have one created two levels above itself.
+rm -rf "$DIST/web"
+"$BIN_PATH/assetgen" web "$DIST/web"
+# Inside the nasmac.app monorepo the site gets them straight away. A standalone
+# clone has no such folder, and must not have one created two levels above it.
 if [ -d "$ROOT/../../www" ]; then
-  "$BIN_PATH/assetgen" web "$ROOT/../../www/assets"
+  mkdir -p "$ROOT/../../www/assets"
+  cp "$DIST/web/"alttab*.png "$ROOT/../../www/assets/"
 fi
 
 echo "==> Building AltTab.icns"

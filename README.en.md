@@ -74,7 +74,7 @@ cd alttab
 ./scripts/build.sh
 ```
 
-You get `dist/AltTab.app`, universal (Apple Silicon and Intel). For the installer, `./scripts/dmg.sh`.
+You get `dist/AltTab.app`, universal (Apple Silicon and Intel). For the installer, `./scripts/dmg.sh`: besides the DMG it lays out `dist/site/`, shaped like the website, with the update manifest and the notes from the [CHANGELOG](CHANGELOG.md).
 
 Handy while changing the code — it prints exactly what the switcher can see, along with the state of both permissions:
 

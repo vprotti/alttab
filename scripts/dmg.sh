@@ -1,5 +1,13 @@
 #!/bin/bash
-# Packages dist/AltTab.app into a styled DMG at www/downloads/AltTab.dmg.
+# Packages dist/AltTab.app into a styled DMG, dist/AltTab-<version>.dmg, and
+# lays out dist/site/ exactly like the nasmac.app web root:
+#
+#   downloads/AltTab.dmg            the link on the site and in the README
+#   downloads/AltTab-<version>.dmg  what the update manifest points at
+#   updates/alttab.json             read by the app's updater once a day
+#   assets/alttab*.png              the icons
+#
+# so a release goes up with one copy. The notes come from CHANGELOG.md.
 # Requires dist/AltTab.app and dist/dmg-bg.png (run scripts/build.sh first).
 #
 # NOTE: the Finder-styling step (osascript) triggers a one-time macOS prompt
@@ -85,9 +93,60 @@ hdiutil verify "$OUT_DMG" >/dev/null
 "$ROOT/scripts/sign.sh" "$OUT_DMG" --notarize
 echo "==> Built: $OUT_DMG ($(du -h "$OUT_DMG" | cut -f1))"
 
+# The notes for this version, one line per language, from CHANGELOG.md. The
+# environment wins when set, for a one-off release.
+notes_for() {
+  python3 - "$ROOT/CHANGELOG.md" "$APP_VERSION" "$1" <<'PY'
+import re, sys
+path, version, lang = sys.argv[1:4]
+try:
+    text = open(path, encoding="utf-8").read()
+except OSError:
+    sys.exit(0)
+section = re.search(r"^## " + re.escape(version) + r"[ \t]*$(.*?)(?=^## |\Z)", text, re.S | re.M)
+if section:
+    for line in section.group(1).splitlines():
+        if line.startswith(lang + ":"):
+            print(line[len(lang) + 1:].strip())
+            break
+PY
+}
+NOTES_PT="${NOTES_PT:-$(notes_for pt)}"
+NOTES_EN="${NOTES_EN:-$(notes_for en)}"
+if [ -z "$NOTES_PT" ] || [ -z "$NOTES_EN" ]; then
+  echo "warning: CHANGELOG.md has no pt:/en: notes for $APP_VERSION, the manifest will carry none" >&2
+fi
+
+echo "==> Laying out dist/site"
+SITE="$DIST/site"
+rm -rf "$SITE"
+mkdir -p "$SITE/downloads" "$SITE/updates" "$SITE/assets"
+cp "$OUT_DMG" "$SITE/downloads/AltTab-$APP_VERSION.dmg"
+cp "$OUT_DMG" "$SITE/downloads/AltTab.dmg"
+if [ -d "$DIST/web" ]; then cp "$DIST/web/"alttab*.png "$SITE/assets/"; fi
+
+# The shape the updater reads: the version, the file relative to the site
+# root, and the SHA-256 it checks the download against before installing.
+DMG_SHA="$(shasum -a 256 "$OUT_DMG" | cut -d' ' -f1)"
+DMG_SIZE="$(stat -f%z "$OUT_DMG")"
+python3 - "$SITE/updates/alttab.json" "$APP_VERSION" "downloads/AltTab-$APP_VERSION.dmg" \
+  "$DMG_SHA" "$DMG_SIZE" "$NOTES_PT" "$NOTES_EN" <<'PY'
+import datetime, json, sys
+out, version, file, sha, size, pt, en = sys.argv[1:8]
+manifest = {"latest": {
+    "version": version, "file": file, "sha256": sha, "size": int(size),
+    "notes": {"pt": pt, "en": en}, "date": datetime.date.today().isoformat(),
+}}
+with open(out, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
+echo "==> Site: $SITE"
+echo "    sha256 $DMG_SHA  ($DMG_SIZE bytes)"
+
 # Inside the nasmac.app monorepo this also publishes the release and refreshes
-# the update manifest. From a standalone clone the DMG above is the output.
+# the update manifest. From a standalone clone, dist/site above is the output.
 PUBLISH="$ROOT/../../scripts/publish-release.sh"
 if [ -x "$PUBLISH" ]; then
-  "$PUBLISH" "alttab" "AltTab" "$APP_VERSION" "$OUT_DMG" "${NOTES_PT:-}" "${NOTES_EN:-}"
+  "$PUBLISH" "alttab" "AltTab" "$APP_VERSION" "$OUT_DMG" "$NOTES_PT" "$NOTES_EN"
 fi

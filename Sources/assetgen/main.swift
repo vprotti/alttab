@@ -1,13 +1,18 @@
 import AppKit
 
 // Renders every raster asset for AltTab from code, so the artwork is
-// reproducible and versioned. The cup shape mirrors the runtime menu bar icon
-// in Sources/AltTab/StatusIcons.swift — keep the two in sync.
+// reproducible and versioned. The two-window mark mirrors the runtime menu bar
+// icon (StatusIcons, in Sources/AltTab/StatusItemController.swift) — keep the
+// two in sync.
 //
 // Usage:
 //   assetgen icon <out.png>            1024x1024 app icon
 //   assetgen dmg-background <out.png>  1320x800 px (660x400 pt @2x)
-//   assetgen web <outdir>              alttab@2x/alttab/apple-touch-icon/favicon
+//   assetgen web <outdir>              alttab@2x, alttab, alttab-touch, alttab-64
+//
+// Every web file carries the app's name. The folder they land in is shared by
+// every app on nasmac.app, and a plain favicon.png written from here replaced
+// the whole site's icon with this app's on every build.
 
 let markColor = NSColor(calibratedRed: 0.30, green: 0.58, blue: 0.98, alpha: 1.0)
 let markLight = NSColor(calibratedRed: 0.50, green: 0.74, blue: 1.00, alpha: 1.0)
@@ -256,9 +261,9 @@ case "web":
     write(renderPNG(pixelsWide: 512, pixelsHigh: 512, draw: drawIcon),
           to: dir + "/alttab.png")
     write(renderPNG(pixelsWide: 180, pixelsHigh: 180, draw: drawIcon),
-          to: dir + "/apple-touch-icon.png")
+          to: dir + "/alttab-touch.png")
     write(renderPNG(pixelsWide: 64, pixelsHigh: 64, draw: drawIcon),
-          to: dir + "/favicon.png")
+          to: dir + "/alttab-64.png")
 
 default:
     FileHandle.standardError.write("unknown command \(args[1])\n".data(using: .utf8)!)
