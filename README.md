@@ -76,6 +76,8 @@ cd alttab
 
 O resultado é `dist/AltTab.app`, universal (Apple Silicon e Intel). Para o instalador, `./scripts/dmg.sh`: além do DMG, ele monta `dist/site/` já no formato do site, com o manifesto de atualização e as notas do [CHANGELOG](CHANGELOG.md).
 
+Para trocar a cópia instalada por essa build, num comando só: `./scripts/install.sh`. Ele fecha o AltTab aberto, manda a versão antiga para o Lixo, limpa as permissões que o macOS prendeu a ela e abre a nova. Os ajustes ficam, a menos que você passe `--clean`.
+
 Útil ao mexer no código — imprime exatamente o que o alternador enxerga, com o estado das permissões:
 
 ```bash
